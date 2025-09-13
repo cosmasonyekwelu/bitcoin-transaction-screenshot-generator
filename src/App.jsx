@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useRef, useState, forwardRef } from "react";
 import axios from "axios";
 import { toPng } from "html-to-image";
 
+// No cookies (helps with CORS)
+axios.defaults.withCredentials = false;
+
 /* ---------------- helpers ---------------- */
 const satsToBtc = (s) => Number(s || 0) / 1e8;
 const fmtBtc = (n) =>
@@ -96,49 +99,36 @@ const DeviceFrame = forwardRef(function DeviceFrame({ device = "iphone", childre
   );
 });
 
-/* ---------------- Browser-only acceleration helpers ---------------- */
-// CORS-friendly GETs to mempool.space for metadata + hex
+/* ---------------- Small mempool helpers ---------------- */
 async function getMempoolTxMeta(txid) {
-  try {
-    const { data } = await axios.get(`https://mempool.space/api/tx/${encodeURIComponent(txid)}`, { timeout: 15000 });
-    return {
-      fee: typeof data?.fee === "number" ? data.fee : null,
-      vsize: typeof data?.vsize === "number" ? data.vsize : null,
-      replaceable: !!(data?.status?.replaceable),
-      confirmed: !!(data?.status?.confirmed),
-    };
-  } catch (error) {
-    console.error("Error fetching mempool transaction metadata:", error);
-    return null;
-  }
+  const { data } = await axios.get(`https://mempool.space/api/tx/${encodeURIComponent(txid)}`, { timeout: 15000 });
+  return {
+    fee: typeof data?.fee === "number" ? data.fee : null,
+    vsize: typeof data?.vsize === "number" ? data.vsize : null,
+    replaceable: !!(data?.status?.replaceable),
+    confirmed: !!(data?.status?.confirmed),
+  };
 }
-
 async function getMempoolHex(txid) {
-  try {
-    const { data } = await axios.get(`https://mempool.space/api/tx/${encodeURIComponent(txid)}/hex`, { timeout: 15000 });
-    if (!data || typeof data !== "string" || !/^[0-9a-fA-F]+$/.test(data)) throw new Error("Could not get raw hex");
-    return data.trim();
-  } catch (error) {
-    console.error("Error fetching transaction hex:", error);
-    throw error;
-  }
+  const { data } = await axios.get(`https://mempool.space/api/tx/${encodeURIComponent(txid)}/hex`, { timeout: 15000 });
+  if (!data || typeof data !== "string" || !/^[0-9a-fA-F]+$/.test(data)) throw new Error("Could not fetch raw hex.");
+  return data.trim();
 }
-
 async function getMempoolFees() {
-  try {
-    const { data } = await axios.get(`https://mempool.space/api/v1/fees/recommended`, { timeout: 15000 });
-    return data || null;
-  } catch (error) {
-    console.error("Error fetching fee recommendations:", error);
-    return null;
-  }
+  const { data } = await axios.get(`https://mempool.space/api/v1/fees/recommended`, { timeout: 15000 });
+  return data || null;
 }
 
-/* ---------------- Fixed broadcaster (CORS-compatible) ---------------- */
+/* ---------------- Browser-friendly rebroadcaster ---------------- */
+const ESPLORA_TARGETS = [
+  "https://mempool.space/api/tx",
+  "https://blockstream.info/api/tx",
+];
+
 async function broadcastEverywhere({ rawHex }) {
   const results = {};
 
-  // 1) Blockchain.com (CORS-enabled when ?cors=true; form-encoded)
+  // Blockchain.com (form-encoded + ?cors=true)
   try {
     const body = new URLSearchParams({ tx: rawHex }).toString();
     const { data, status } = await axios.post(
@@ -148,65 +138,38 @@ async function broadcastEverywhere({ rawHex }) {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         timeout: 20000,
         validateStatus: () => true,
+        withCredentials: false,
       }
     );
-    results["Blockchain.com"] = { ok: status >= 200 && status < 300, status, data };
+    results["blockchain.info"] = { ok: status >= 200 && status < 300, status, data };
   } catch (e) {
-    results["Blockchain.com"] = { ok: false, status: null, error: e?.message || "request failed" };
+    results["blockchain.info"] = { ok: false, status: null, error: e?.message || "request failed" };
   }
 
-  // 2) mempool.space (text/plain raw hex)
-  try {
-    const { data, status } = await axios.post(
-      "https://mempool.space/api/tx",
-      rawHex,
-      {
-        headers: { "Content-Type": "text/plain" },
-        timeout: 20000,
-        validateStatus: () => true,
-      }
-    );
-    results["mempool.space"] = { ok: status >= 200 && status < 300, status, data };
-  } catch (e) {
-    results["mempool.space"] = { ok: false, status: null, error: e?.message || "request failed" };
-  }
-
-  // 3) Blockstream (Esplora-compatible)
-  try {
-    const { data, status } = await axios.post(
-      "https://blockstream.info/api/tx",
-      rawHex,
-      {
-        headers: { "Content-Type": "text/plain" },
-        timeout: 20000,
-        validateStatus: () => true,
-      }
-    );
-    results["Blockstream"] = { ok: status >= 200 && status < 300, status, data };
-  } catch (e) {
-    results["Blockstream"] = { ok: false, status: null, error: e?.message || "request failed" };
-  }
-
-  // 4) Replace BlockCypher with Bitaps (CORS-friendly)
-  try {
-    const { data, status } = await axios.post(
-      "https://api.bitaps.com/btc/v1/broadcast/transaction",
-      { tx: rawHex },
-      {
-        headers: { "Content-Type": "application/json" },
-        timeout: 20000,
-        validateStatus: () => true,
-      }
-    );
-    results["Bitaps"] = { ok: status >= 200 && status < 300, status, data };
-  } catch (e) {
-    results["Bitaps"] = { ok: false, status: null, error: e?.message || "request failed" };
+  // Esplora-compatible (raw hex, text/plain)
+  for (const url of ESPLORA_TARGETS) {
+    const name = new URL(url).hostname;
+    try {
+      const { data, status } = await axios.post(
+        url,
+        rawHex,
+        {
+          headers: { "Content-Type": "text/plain" },
+          timeout: 20000,
+          validateStatus: () => true,
+          withCredentials: false,
+        }
+      );
+      results[name] = { ok: status >= 200 && status < 300, status, data };
+    } catch (e) {
+      results[name] = { ok: false, status: null, error: e?.message || "request failed" };
+    }
   }
 
   return results;
 }
 
-/* ---------------- Acceleration Components ---------------- */
+/* ---------------- Acceleration (rebroadcast) UI ---------------- */
 const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
   const [feeRate, setFeeRate] = useState(currentFeeRate ? Math.ceil(currentFeeRate * 1.5) : 20);
   const [accelerating, setAccelerating] = useState(false);
@@ -234,6 +197,12 @@ const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
   const handleAccelerate = async () => {
     setAccelerating(true); setErr(""); setResult(null);
     try {
+      const m = meta || await getMempoolTxMeta(txid);
+      if (m?.confirmed) {
+        setErr("This transaction is already confirmed. Rebroadcasting is not needed.");
+        setAccelerating(false);
+        return;
+      }
       const hex = await getMempoolHex(txid);
       const results = await broadcastEverywhere({ rawHex: hex });
       setResult({ results, txid, hexPreview: shorten(hex, 12, 8) });
@@ -246,7 +215,7 @@ const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
         estimatedConfirmationTime: Math.floor(Math.random() * 6) + 1,
       });
     } catch (e) {
-      setErr(e?.message || "Rebroadcast failed");
+      setErr(e?.response?.data || e?.message || "Rebroadcast failed");
     } finally {
       setAccelerating(false);
     }
@@ -275,24 +244,24 @@ const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
             className="w-full bg-neutral-800 border border-neutral-700 rounded-xl px-3 py-2 outline-none"
           />
           <div className="text-xs text-neutral-500 mt-1">
-            Recommended: {currSatVb ? Math.ceil(currSatVb * 1.5) : 20} sat/vB or higher (use wallet RBF/CPFP to actually change fees)
+            Rebroadcasting doesn’t raise fees. Use <b>RBF</b> (if replaceable) or <b>CPFP</b> to truly speed up.
           </div>
         </div>
       </div>
 
       {!!fees && (
         <div className="rounded-xl border border-neutral-800 p-3 text-xs">
-          <div className="text-neutral-400 mb-1">mempool.space fees</div>
+          <div className="text-neutral-400 mb-1">mempool.space fee guide</div>
           <ul className="space-y-1">
             <li>Fastest: <b>{fees.fastestFee}</b> sat/vB</li>
-            <li>30 min: <b>{fees.halfHourFee}</b> sat/vB</li>
-            <li>60 min: <b>{fees.hourFee}</b> sat/vB</li>
+            <li>~30 min: <b>{fees.halfHourFee}</b> sat/vB</li>
+            <li>~60 min: <b>{fees.hourFee}</b> sat/vB</li>
             <li>Minimum: <b>{fees.minimumFee}</b> sat/vB</li>
           </ul>
         </div>
       )}
 
-      {err && <div className="p-3 rounded-xl text-sm bg-red-500/10 border border-red-500/20 text-red-300">{err}</div>}
+      {err && <div className="p-3 rounded-xl text-sm bg-red-500/10 border border-red-500/20 text-red-300">{String(err).slice(0, 600)}</div>}
 
       {result && (
         <div className="rounded-xl border border-neutral-800 overflow-hidden">
@@ -315,35 +284,29 @@ const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
                     <div className="max-w-[520px] whitespace-pre-wrap break-words text-neutral-300">
                       {typeof r?.data === "string"
                         ? r.data.slice(0, 400)
-                        : JSON.stringify(r?.data || r?.error || "", null, 2).slice(0, 400)}
+                        : JSON.stringify(r?.data ?? r?.error ?? "", null, 2).slice(0, 400)}
                     </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <div className="p-2 text-[11px] text-neutral-500">
-            Raw hex preview: {result.hexPreview}
-          </div>
+          <div className="p-2 text-[11px] text-neutral-500">Raw hex preview: {result.hexPreview}</div>
         </div>
       )}
 
       <div className="flex gap-2">
         <button
           onClick={handleAccelerate}
-          disabled={accelerating}
+          disabled={accelerating || meta?.confirmed}
           className="bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-neutral-900 rounded-xl px-4 py-2 font-medium"
         >
-          {accelerating ? "Rebroadcasting…" : "Rebroadcast to explorers"}
+          {accelerating ? "Rebroadcasting…" : meta?.confirmed ? "Already confirmed" : "Rebroadcast"}
         </button>
         <button onClick={onCancel} className="bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-xl px-4 py-2">
           Cancel
         </button>
       </div>
-
-      <p className="text-[11px] text-neutral-500">
-        Rebroadcasting spreads your tx; it does <b>not</b> raise its fee. To truly speed up confirmation, use RBF (if replaceable) or CPFP.
-      </p>
     </div>
   );
 };
@@ -375,25 +338,31 @@ const AccelerationHistory = ({ accelerations }) => {
 
 /* ---------------- Main App ---------------- */
 export default function App() {
-  const [device, setDevice] = useState("iphone");
+  const [device, setDevice] = useState("iphone"); // 'iphone' | 'galaxy'
   const [address, setAddress] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Address Summary state
   const [addrLoading, setAddrLoading] = useState(false);
   const [addrError, setAddrError] = useState("");
   const [summary, setSummary] = useState({
     balanceSats: null,
     receivedSats: null,
     sentSats: null,
-    usdPrice: null,
+    usdPrice: null, // current BTC/USD
   });
-  const [txs, setTxs] = useState([]);
+
+  const [txs, setTxs] = useState([]); // rawaddr list w/ I/O
   const [selectedTxid, setSelectedTxid] = useState("");
-  const [filterMode, setFilterMode] = useState("all");
-  const [blockHeight, setBlockHeight] = useState(null);
+  const [filterMode, setFilterMode] = useState("all"); // 'all' | 'incoming' | 'outgoing'
+
+  const [blockHeight, setBlockHeight] = useState(null); // if null => UNCONFIRMED
   const [tipHeight, setTipHeight] = useState(null);
-  const [usdDaily, setUsdDaily] = useState(null);
-  const [txSize, setTxSize] = useState(null);
+  const [usdDaily, setUsdDaily] = useState(null); // daily USD close to tx date
+  const [txSize, setTxSize] = useState(null); // bytes for fee rate calc
+
+  // Acceleration state
   const [showAcceleration, setShowAcceleration] = useState(false);
   const [accelerationHistory, setAccelerationHistory] = useState([]);
 
@@ -422,10 +391,7 @@ export default function App() {
       let best = null, bestDiff = Infinity;
       for (const v of values) {
         const diff = Math.abs(Number(v?.x || 0) - ts);
-        if (diff < bestDiff) {
-          bestDiff = diff;
-          best = v;
-        }
+        if (diff < bestDiff) { bestDiff = diff; best = v; }
       }
       return typeof best?.y === "number" ? best.y : null;
     } catch {
@@ -433,7 +399,7 @@ export default function App() {
     }
   };
 
-  /* ---- fetch address summary ---- */
+  /* ---- Address summary ---- */
   async function fetchAddressSummary() {
     if (!address) return;
     setAddrError(""); setAddrLoading(true);
@@ -470,7 +436,7 @@ export default function App() {
     }
   }
 
-  /* ---- Fetch last 10 txs w/ I/O ---- */
+  /* ---- Fetch last 10 txs ---- */
   async function fetchAddressTxs() {
     if (!address) return;
     setError(""); setLoading(true);
@@ -548,27 +514,35 @@ export default function App() {
     });
   }, [txs, filterMode, address]);
 
-  /* ---- Compute derived view ---- */
+  /* ---- Derived view ---- */
   const view = useMemo(() => {
     if (!selectedTx) return null;
+
     const outToAddr = selectedTx.outs?.reduce((a, o) => a + (o.addr === address ? o.value : 0), 0) || 0;
     const inFromAddr = selectedTx.ins?.reduce((a, i) => a + (i.addr === address ? i.value : 0), 0) || 0;
-    const isIncoming = outToAddr > 0 && inFromAddr === 0;
+    const isIncoming = outToAddr > 0 && inFromAddr === 0; // strict
     const outToOthers = selectedTx.outs?.reduce((a, o) => a + (o.addr !== address ? o.value : 0), 0) || 0;
 
     const valueSats = isIncoming ? outToAddr : outToOthers;
     const amountBtc = satsToBtc(valueSats);
     const feeBtc = satsToBtc(selectedTx.fee);
 
-    let conf = 0;
-    if (blockHeight != null && tipHeight != null) conf = Math.max(0, tipHeight - blockHeight + 1);
-    const status = conf >= TARGET_CONF ? "Confirmed" : "Confirming";
+    const conf = blockHeight == null || tipHeight == null ? 0 : Math.max(0, tipHeight - blockHeight + 1);
+
+    // NEW: Three-phrase status
+    const statusPhrase =
+      conf === 0
+        ? "Pending"
+        : conf >= TARGET_CONF
+        ? "Completed"
+        : `Confirming ${conf}/${TARGET_CONF}`;
+
     const confLabel = `${Math.min(conf, TARGET_CONF)}/${TARGET_CONF} confirmations`;
 
     const amountUsd = usdDaily != null ? amountBtc * usdDaily : null;
     const feeUsd = usdDaily != null ? feeBtc * usdDaily : null;
 
-    const feeRate = txSize ? selectedTx.fee / txSize : null;
+    const feeRate = txSize ? selectedTx.fee / txSize : null; // sats/byte
 
     const uniqueIns = [...new Set((selectedTx.ins || []).map((i) => i.addr).filter(Boolean))];
     const uniqueOuts = [...new Set((selectedTx.outs || []).map((o) => o.addr).filter(Boolean))];
@@ -583,7 +557,7 @@ export default function App() {
       feeBtc,
       feeUsd,
       feeRate,
-      status,
+      statusPhrase,     // <— use instead of old labels
       confLabel,
       confRaw: conf,
       timeLabel: fmtDateTime(selectedTx.time),
@@ -592,10 +566,11 @@ export default function App() {
       fromCount: uniqueIns.length,
       toPeek,
       toCount: uniqueOuts.length,
+      isUnconfirmed: conf === 0,
     };
   }, [selectedTx, address, blockHeight, tipHeight, usdDaily, txSize]);
 
-  /* ---- Handle acceleration ---- */
+  /* ---- Handle “acceleration” row add ---- */
   const handleAccelerate = (accelerationData) => {
     setAccelerationHistory((prev) => [...prev, accelerationData]);
     setShowAcceleration(false);
@@ -625,7 +600,7 @@ export default function App() {
     }
   }
 
-  // Computed USD values for Address Summary
+  // USD values for Address Summary
   const balanceUsd =
     summary.balanceSats != null && summary.usdPrice != null
       ? satsToBtc(summary.balanceSats) * summary.usdPrice
@@ -639,6 +614,18 @@ export default function App() {
       ? satsToBtc(summary.sentSats) * summary.usdPrice
       : null;
 
+  // status chip + bar color classes based on phrase
+  const statusChipClasses = (phrase) =>
+    "text-[12px] px-2 py-[2px] rounded-md border " +
+    (phrase === "Completed"
+      ? "bg-emerald-500/10 border-emerald-600 text-emerald-300"
+      : phrase.startsWith("Confirming")
+      ? "bg-amber-500/10 border-amber-600 text-amber-300"
+      : "bg-rose-500/10 border-rose-600 text-rose-300");
+
+  const barColor = (phrase) =>
+    phrase === "Completed" ? "bg-emerald-600" : phrase.startsWith("Confirming") ? "bg-amber-500" : "bg-rose-500";
+
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
       {/* Header */}
@@ -649,7 +636,7 @@ export default function App() {
             <div>
               <h1 className="text-lg font-semibold">BTC Transaction Screenshot Generator</h1>
               <p className="text-xs text-neutral-400">
-                Blockchain.com explorer + charts (USD) • iPhone/Samsung frame • PNG export • Transaction Acceleration
+                Blockchain.com explorer + charts (USD) • iPhone/Samsung frame • PNG export • Rebroadcast
               </p>
             </div>
           </div>
@@ -720,7 +707,7 @@ export default function App() {
             {error && <div className="text-sm text-red-400 bg-red-950/40 border border-red-800 rounded-xl px-3 py-2">{error}</div>}
           </div>
 
-          {/* Address Summary card (USD-focused) */}
+          {/* Address Summary (USD first) */}
           <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold">Address Summary</h2>
@@ -808,8 +795,8 @@ export default function App() {
             )}
           </div>
 
-          {/* Acceleration Section */}
-          {selectedTx && view?.status === "Confirming" && (
+          {/* Acceleration Section — only if TX is unconfirmed */}
+          {selectedTx && view?.isUnconfirmed && (
             <>
               {showAcceleration ? (
                 <AccelerationForm
@@ -822,7 +809,7 @@ export default function App() {
                 <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900">
                   <h3 className="text-sm font-semibold mb-3">Transaction Acceleration</h3>
                   <p className="text-xs text-neutral-400 mb-3">
-                    This transaction is still confirming. You can rebroadcast it to more nodes for better propagation.
+                    This transaction is <b>unconfirmed</b>. Rebroadcast to more nodes for better propagation. (To truly increase fees, use RBF/CPFP.)
                   </p>
                   <button
                     onClick={() => setShowAcceleration(true)}
@@ -855,7 +842,7 @@ export default function App() {
           </p>
         </section>
 
-        {/* Device + Wallet Sheet */}
+        {/* Device + Wallet Sheet (PREVIOUS DESIGN, with new phrases) */}
         <section className="flex items-start justify-center">
           <DeviceFrame device={device} ref={previewRef}>
             <div className="min-h-full bg-neutral-900">
@@ -903,22 +890,15 @@ export default function App() {
                     <div className="px-4 py-3">
                       <dt className="flex items-center justify-between">
                         <span className="text-neutral-400">Status</span>
-                        <span
-                          className={
-                            "text-[12px] px-2 py-[2px] rounded-md border " +
-                            (view?.status === "Confirmed"
-                              ? "bg-emerald-500/10 border-emerald-600 text-emerald-300"
-                              : "bg-amber-500/10 border-amber-600 text-amber-300")
-                          }
-                        >
-                          {view?.status || "—"}
+                        <span className={statusChipClasses(view?.statusPhrase || "")}>
+                          {view?.statusPhrase || "—"}
                         </span>
                       </dt>
                       <dd>
                         <div className="text-neutral-400 text-sm mt-1">{view?.confLabel || "—"}</div>
                         <div className="mt-2 h-2 rounded bg-neutral-800 overflow-hidden">
                           <div
-                            className={`h-full ${view?.status === "Confirmed" ? "bg-emerald-600" : "bg-amber-500"}`}
+                            className={`h-full ${barColor(view?.statusPhrase || "")}`}
                             style={{ width: `${Math.min(100, ((view?.confRaw || 0) / TARGET_CONF) * 100)}%` }}
                           />
                         </div>
