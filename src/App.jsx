@@ -64,7 +64,7 @@ const StatusBar = ({ device = "iphone" }) => {
           <div className="relative w-[26px] h-[12px] rounded-[4px] border border-neutral-400">
             <div className="absolute -right-[3px] top-[3px] w-[2px] h-[6px] rounded-sm bg-neutral-400" />
             <div className="h-full w-[77%] bg-green-500" />
-          </div>
+            </div>
           <span className="text-[10px] text-neutral-400">77%</span>
         </div>
       )}
@@ -96,6 +96,175 @@ const DeviceFrame = forwardRef(function DeviceFrame({ device = "iphone", childre
   );
 });
 
+/* ---------------- Acceleration Components ---------------- */
+const AccelerationService = {
+  // Mock acceleration service - in a real app, you'd integrate with an actual API
+  async accelerateTransaction(txid, feeRate) {
+    console.log(`Accelerating transaction ${txid} with fee rate ${feeRate} sat/vB`);
+    
+    // Simulate API call delay
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Simulate success (80% of the time)
+    const success = Math.random() > 0.2;
+    
+    if (success) {
+      return {
+        success: true,
+        message: "Transaction acceleration requested successfully",
+        accelerationId: "acc_" + Math.random().toString(36).substr(2, 9),
+        estimatedConfirmationTime: Math.floor(Math.random() * 6) + 1 // 1-6 blocks
+      };
+    } else {
+      return {
+        success: false,
+        message: "Acceleration failed. Transaction may already be confirmed or invalid."
+      };
+    }
+  },
+  
+  async getAccelerationStatus(accelerationId) {
+    // Simulate API call
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    const statuses = ["pending", "processing", "completed", "failed"];
+    const status = statuses[Math.floor(Math.random() * statuses.length)];
+    
+    return {
+      status,
+      block: status === "completed" ? Math.floor(Math.random() * 100) + 100 : null,
+      message: `Acceleration is ${status}`
+    };
+  }
+};
+
+const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
+  const [feeRate, setFeeRate] = useState(currentFeeRate ? Math.ceil(currentFeeRate * 1.5) : 20);
+  const [accelerating, setAccelerating] = useState(false);
+  const [result, setResult] = useState(null);
+  
+  const handleAccelerate = async () => {
+    setAccelerating(true);
+    setResult(null);
+    
+    try {
+      const accelerationResult = await AccelerationService.accelerateTransaction(txid, feeRate);
+      setResult(accelerationResult);
+      
+      if (accelerationResult.success) {
+        onAccelerate({
+          txid,
+          feeRate,
+          accelerationId: accelerationResult.accelerationId,
+          timestamp: Date.now(),
+          estimatedConfirmationTime: accelerationResult.estimatedConfirmationTime
+        });
+      }
+    } catch (error) {
+      setResult({
+        success: false,
+        message: "Network error. Please try again."
+      });
+    } finally {
+      setAccelerating(false);
+    }
+  };
+  
+  return (
+    <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900 space-y-4">
+      <h3 className="text-sm font-semibold">Accelerate Transaction</h3>
+      
+      <div className="space-y-3">
+        <div>
+          <label className="block text-xs text-neutral-400 mb-1">Transaction ID</label>
+          <div className="font-mono text-sm bg-neutral-800 p-2 rounded-lg">{shorten(txid)}</div>
+        </div>
+        
+        <div>
+          <label className="block text-xs text-neutral-400 mb-1">Current Fee Rate</label>
+          <div className="text-sm">
+            {currentFeeRate ? `${currentFeeRate.toFixed(1)} sat/vB` : "Unknown"}
+          </div>
+        </div>
+        
+        <div>
+          <label className="block text-xs text-neutral-400 mb-1">New Fee Rate (sat/vB)</label>
+          <input
+            type="number"
+            min={currentFeeRate ? Math.ceil(currentFeeRate * 1.1) : 1}
+            max={500}
+            value={feeRate}
+            onChange={(e) => setFeeRate(Number(e.target.value))}
+            className="w-full bg-neutral-800 border border-neutral-700 rounded-xl px-3 py-2 outline-none"
+          />
+          <div className="text-xs text-neutral-500 mt-1">
+            Recommended: {currentFeeRate ? Math.ceil(currentFeeRate * 1.5) : 20} sat/vB or higher
+          </div>
+        </div>
+      </div>
+      
+      {result && (
+        <div className={`p-3 rounded-xl text-sm ${
+          result.success 
+            ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-300" 
+            : "bg-red-500/10 border border-red-500/20 text-red-300"
+        }`}>
+          {result.message}
+        </div>
+      )}
+      
+      <div className="flex gap-2">
+        <button
+          onClick={handleAccelerate}
+          disabled={accelerating}
+          className="bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-neutral-900 rounded-xl px-4 py-2 font-medium"
+        >
+          {accelerating ? "Accelerating..." : "Accelerate Transaction"}
+        </button>
+        <button
+          onClick={onCancel}
+          className="bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-xl px-4 py-2"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const AccelerationHistory = ({ accelerations }) => {
+  if (!accelerations || accelerations.length === 0) {
+    return null;
+  }
+  
+  return (
+    <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900">
+      <h3 className="text-sm font-semibold mb-3">Acceleration History</h3>
+      
+      <div className="space-y-3">
+        {accelerations.map((acc, index) => (
+          <div key={index} className="p-3 bg-neutral-800/40 rounded-xl border border-neutral-700">
+            <div className="flex justify-between items-start">
+              <div>
+                <div className="text-xs font-mono">{shorten(acc.txid, 8, 4)}</div>
+                <div className="text-xs text-neutral-400">
+                  {new Date(acc.timestamp).toLocaleString()}
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-sm font-medium">{acc.feeRate} sat/vB</div>
+                <div className="text-xs text-neutral-400">
+                  Est: {acc.estimatedConfirmationTime} blocks
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 /* ---------------- Main App ---------------- */
 export default function App() {
   const [device, setDevice] = useState("iphone"); // 'iphone' | 'galaxy'
@@ -121,6 +290,10 @@ export default function App() {
   const [tipHeight, setTipHeight] = useState(null);
   const [usdDaily, setUsdDaily] = useState(null); // daily USD close to tx date
   const [txSize, setTxSize] = useState(null); // bytes for fee rate calc
+
+  // NEW: Acceleration state
+  const [showAcceleration, setShowAcceleration] = useState(false);
+  const [accelerationHistory, setAccelerationHistory] = useState([]);
 
   const TARGET_CONF = 4;
   const previewRef = useRef(null);
@@ -352,6 +525,12 @@ export default function App() {
     };
   }, [selectedTx, address, blockHeight, tipHeight, usdDaily, txSize]);
 
+  /* ---- NEW: Handle transaction acceleration ---- */
+  const handleAccelerate = (accelerationData) => {
+    setAccelerationHistory(prev => [...prev, accelerationData]);
+    setShowAcceleration(false);
+  };
+
   /* ---- Copy & Screenshot ---- */
   async function copyTxid() {
     if (!view?.txid) return;
@@ -393,7 +572,7 @@ export default function App() {
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-400 to-yellow-600 grid place-items-center text-neutral-900 font-bold">₿</div>
             <div>
               <h1 className="text-lg font-semibold">BTC Transaction Screenshot Generator</h1>
-              <p className="text-xs text-neutral-400">Blockchain.com explorer + charts (USD) • iPhone/Samsung frame • PNG export</p>
+              <p className="text-xs text-neutral-400">Blockchain.com explorer + charts (USD) • iPhone/Samsung frame • PNG export • Transaction Acceleration</p>
             </div>
           </div>
 
@@ -463,7 +642,7 @@ export default function App() {
             {error && <div className="text-sm text-red-400 bg-red-950/40 border border-red-800 rounded-xl px-3 py-2">{error}</div>}
           </div>
 
-          {/* NEW: Address Summary card */}
+          {/* Address Summary card */}
           <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold">Address Summary</h2>
@@ -482,7 +661,10 @@ export default function App() {
                 <div>
                   <div className="text-neutral-400">Current Balance</div>
                   <div className="font-medium">
-                    {summary.balanceSats == null ? "—" : `${summary.balanceSats.toLocaleString()} sats`}
+                    {summary.balanceSats == null || summary.usdPrice == null 
+                      ? "—" 
+                      : fmtUSD(satsToBtc(summary.balanceSats) * summary.usdPrice)
+                    }
                   </div>
                   <div className="text-neutral-400 text-xs">
                     {summary.balanceSats == null ? "" : `${fmtBtc(satsToBtc(summary.balanceSats))} BTC`}
@@ -501,7 +683,10 @@ export default function App() {
                 <div>
                   <div className="text-neutral-400">Total Received</div>
                   <div className="font-medium">
-                    {summary.receivedSats == null ? "—" : `${summary.receivedSats.toLocaleString()} sats`}
+                    {summary.receivedSats == null || summary.usdPrice == null 
+                      ? "—" 
+                      : fmtUSD(satsToBtc(summary.receivedSats) * summary.usdPrice)
+                    }
                   </div>
                   <div className="text-neutral-400 text-xs">
                     {summary.receivedSats == null ? "" : `${fmtBtc(satsToBtc(summary.receivedSats))} BTC`}
@@ -510,7 +695,10 @@ export default function App() {
                 <div>
                   <div className="text-neutral-400">Total Sent</div>
                   <div className="font-medium">
-                    {summary.sentSats == null ? "—" : `${summary.sentSats.toLocaleString()} sats`}
+                    {summary.sentSats == null || summary.usdPrice == null 
+                      ? "—" 
+                      : fmtUSD(satsToBtc(summary.sedSats) * summary.usdPrice)
+                    }
                   </div>
                   <div className="text-neutral-400 text-xs">
                     {summary.sentSats == null ? "" : `${fmtBtc(satsToBtc(summary.sentSats))} BTC`}
@@ -550,6 +738,36 @@ export default function App() {
               </select>
             )}
           </div>
+
+          {/* Acceleration Section */}
+          {selectedTx && view?.status === "Confirming" && (
+            <>
+              {showAcceleration ? (
+                <AccelerationForm
+                  txid={selectedTxid}
+                  currentFeeRate={view?.feeRate}
+                  onAccelerate={handleAccelerate}
+                  onCancel={() => setShowAcceleration(false)}
+                />
+              ) : (
+                <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900">
+                  <h3 className="text-sm font-semibold mb-3">Transaction Acceleration</h3>
+                  <p className="text-xs text-neutral-400 mb-3">
+                    This transaction is still confirming. You can accelerate it by paying a higher fee.
+                  </p>
+                  <button
+                    onClick={() => setShowAcceleration(true)}
+                    className="bg-amber-500 hover:bg-amber-400 text-neutral-900 rounded-xl px-4 py-2 font-medium"
+                  >
+                    Accelerate Transaction
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Acceleration History */}
+          <AccelerationHistory accelerations={accelerationHistory} />
 
           {/* Screenshot */}
           <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900">
@@ -650,7 +868,7 @@ export default function App() {
                           <span className="font-mono text-sm text-neutral-300">{view?.txid ? shorten(view.txid, 12, 6) : "—"}</span>
                           <button onClick={copyTxid} disabled={!view?.txid} className="text-blue-400 hover:text-blue-300 text-sm disabled:opacity-50">
                             Copy Transaction ID
-                          </button>
+                            </button>
                         </div>
                       </dd>
                     </div>
