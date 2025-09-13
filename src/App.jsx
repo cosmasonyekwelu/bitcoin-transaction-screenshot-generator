@@ -64,7 +64,7 @@ const StatusBar = ({ device = "iphone" }) => {
           <div className="relative w-[26px] h-[12px] rounded-[4px] border border-neutral-400">
             <div className="absolute -right-[3px] top-[3px] w-[2px] h-[6px] rounded-sm bg-neutral-400" />
             <div className="h-full w-[77%] bg-green-500" />
-            </div>
+          </div>
           <span className="text-[10px] text-neutral-400">77%</span>
         </div>
       )}
@@ -96,166 +96,256 @@ const DeviceFrame = forwardRef(function DeviceFrame({ device = "iphone", childre
   );
 });
 
-/* ---------------- Acceleration Components ---------------- */
-const AccelerationService = {
-  // Mock acceleration service - in a real app, you'd integrate with an actual API
-  async accelerateTransaction(txid, feeRate) {
-    console.log(`Accelerating transaction ${txid} with fee rate ${feeRate} sat/vB`);
-    
-    // Simulate API call delay
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Simulate success (80% of the time)
-    const success = Math.random() > 0.2;
-    
-    if (success) {
-      return {
-        success: true,
-        message: "Transaction acceleration requested successfully",
-        accelerationId: "acc_" + Math.random().toString(36).substr(2, 9),
-        estimatedConfirmationTime: Math.floor(Math.random() * 6) + 1 // 1-6 blocks
-      };
-    } else {
-      return {
-        success: false,
-        message: "Acceleration failed. Transaction may already be confirmed or invalid."
-      };
-    }
-  },
-  
-  async getAccelerationStatus(accelerationId) {
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    const statuses = ["pending", "processing", "completed", "failed"];
-    const status = statuses[Math.floor(Math.random() * statuses.length)];
-    
-    return {
-      status,
-      block: status === "completed" ? Math.floor(Math.random() * 100) + 100 : null,
-      message: `Acceleration is ${status}`
-    };
-  }
-};
+/* ---------------- Browser-only acceleration helpers ---------------- */
+// CORS-friendly GETs to mempool.space for metadata + hex
+async function getMempoolTxMeta(txid) {
+  const { data } = await axios.get(`https://mempool.space/api/tx/${encodeURIComponent(txid)}`, { timeout: 15000 });
+  return {
+    fee: typeof data?.fee === "number" ? data.fee : null,
+    vsize: typeof data?.vsize === "number" ? data.vsize : null,
+    replaceable: !!(data?.status?.replaceable),
+    confirmed: !!(data?.status?.confirmed),
+  };
+}
+async function getMempoolHex(txid) {
+  const { data } = await axios.get(`https://mempool.space/api/tx/${encodeURIComponent(txid)}/hex`, { timeout: 15000 });
+  if (!data || typeof data !== "string" || !/^[0-9a-fA-F]+$/.test(data)) throw new Error("Could not get raw hex");
+  return data.trim();
+}
+async function getMempoolFees() {
+  const { data } = await axios.get(`https://mempool.space/api/v1/fees/recommended`, { timeout: 15000 });
+  return data || null;
+}
 
+/* ---------------- Your requested broadcaster (verbatim) ---------------- */
+// Browser-friendly fan-out broadcaster
+async function broadcastEverywhere({ rawHex }) {
+  const results = {};
+
+  // 1) Blockchain.com (CORS-enabled when ?cors=true; form-encoded)
+  try {
+    const body = new URLSearchParams({ tx: rawHex }).toString();
+    const { data, status } = await axios.post(
+      "https://blockchain.info/pushtx?cors=true",
+      body,
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        timeout: 20000,
+        validateStatus: () => true, // capture 4xx as normal responses
+      }
+    );
+    results["Blockchain.com"] = { ok: status >= 200 && status < 300, status, data };
+  } catch (e) {
+    results["Blockchain.com"] = { ok: false, status: null, error: e?.message || "request failed" };
+  }
+
+  // 2) mempool.space (text/plain raw hex)
+  try {
+    const { data, status } = await axios.post(
+      "https://mempool.space/api/tx",
+      rawHex,
+      {
+        headers: { "Content-Type": "text/plain" },
+        timeout: 20000,
+        validateStatus: () => true,
+      }
+    );
+    results["mempool.space"] = { ok: status >= 200 && status < 300, status, data };
+  } catch (e) {
+    results["mempool.space"] = { ok: false, status: null, error: e?.message || "request failed" };
+  }
+
+  // 3) Blockstream (Esplora-compatible)
+  try {
+    const { data, status } = await axios.post(
+      "https://blockstream.info/api/tx",
+      rawHex,
+      {
+        headers: { "Content-Type": "text/plain" },
+        timeout: 20000,
+        validateStatus: () => true,
+      }
+    );
+    results["Blockstream"] = { ok: status >= 200 && status < 300, status, data };
+  } catch (e) {
+    results["Blockstream"] = { ok: false, status: null, error: e?.message || "request failed" };
+  }
+
+  // 4) BlockCypher (fire-and-forget; no CORS readback in browser)
+  try {
+    const url = "https://api.blockcypher.com/v1/btc/main/txs/push";
+    const payload = new Blob([JSON.stringify({ tx: rawHex })], { type: "application/json" });
+    const sent = navigator.sendBeacon(url, payload);
+    results["BlockCypher"] = {
+      ok: sent,
+      status: sent ? "sent (no-cors)" : "failed to queue",
+      data: null,
+    };
+  } catch (e) {
+    results["BlockCypher"] = { ok: false, status: null, error: e?.message || "beacon failed" };
+  }
+
+  return results;
+}
+
+/* ---------------- Acceleration Components ---------------- */
 const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
   const [feeRate, setFeeRate] = useState(currentFeeRate ? Math.ceil(currentFeeRate * 1.5) : 20);
   const [accelerating, setAccelerating] = useState(false);
   const [result, setResult] = useState(null);
-  
+  const [err, setErr] = useState("");
+  const [fees, setFees] = useState(null);
+  const [meta, setMeta] = useState(null);
+
+  useEffect(() => {
+    let ignore = false;
+    (async () => {
+      try {
+        const [f, m] = await Promise.all([getMempoolFees(), getMempoolTxMeta(txid)]);
+        if (ignore) return;
+        setFees(f || null);
+        setMeta(m || null);
+        if (m?.fee && m?.vsize && !currentFeeRate) {
+          setFeeRate(Math.ceil((m.fee / m.vsize) * 1.5));
+        }
+      } catch (_) {}
+    })();
+    return () => { ignore = true; };
+  }, [txid]);
+
   const handleAccelerate = async () => {
-    setAccelerating(true);
-    setResult(null);
-    
+    setAccelerating(true); setErr(""); setResult(null);
     try {
-      const accelerationResult = await AccelerationService.accelerateTransaction(txid, feeRate);
-      setResult(accelerationResult);
-      
-      if (accelerationResult.success) {
-        onAccelerate({
-          txid,
-          feeRate,
-          accelerationId: accelerationResult.accelerationId,
-          timestamp: Date.now(),
-          estimatedConfirmationTime: accelerationResult.estimatedConfirmationTime
-        });
-      }
-    } catch (error) {
-      setResult({
-        success: false,
-        message: "Network error. Please try again."
+      const hex = await getMempoolHex(txid); // fetch raw hex in-browser
+      const results = await broadcastEverywhere({ rawHex: hex });
+      setResult({ results, txid, hexPreview: shorten(hex, 12, 8) });
+
+      onAccelerate({
+        txid,
+        feeRate,
+        accelerationId: "rebroadcast_" + Math.random().toString(36).slice(2, 10),
+        timestamp: Date.now(),
+        estimatedConfirmationTime: Math.floor(Math.random() * 6) + 1, // cosmetic
       });
+    } catch (e) {
+      setErr(e?.message || "Rebroadcast failed");
     } finally {
       setAccelerating(false);
     }
   };
-  
+
+  const currSatVb = meta?.fee && meta?.vsize ? (meta.fee / meta.vsize) : currentFeeRate;
+
   return (
     <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900 space-y-4">
-      <h3 className="text-sm font-semibold">Accelerate Transaction</h3>
-      
-      <div className="space-y-3">
+      <h3 className="text-sm font-semibold">Accelerate (Rebroadcast)</h3>
+
+      <div className="grid gap-3 md:grid-cols-2">
         <div>
           <label className="block text-xs text-neutral-400 mb-1">Transaction ID</label>
           <div className="font-mono text-sm bg-neutral-800 p-2 rounded-lg">{shorten(txid)}</div>
         </div>
-        
         <div>
-          <label className="block text-xs text-neutral-400 mb-1">Current Fee Rate</label>
-          <div className="text-sm">
-            {currentFeeRate ? `${currentFeeRate.toFixed(1)} sat/vB` : "Unknown"}
-          </div>
+          <label className="block text-xs text-neutral-400 mb-1">Detected Fee Rate</label>
+          <div className="text-sm">{currSatVb ? `${currSatVb.toFixed(1)} sat/vB` : "—"}</div>
         </div>
-        
         <div>
-          <label className="block text-xs text-neutral-400 mb-1">New Fee Rate (sat/vB)</label>
+          <label className="block text-xs text-neutral-400 mb-1">Target Fee Rate (UI hint)</label>
           <input
-            type="number"
-            min={currentFeeRate ? Math.ceil(currentFeeRate * 1.1) : 1}
-            max={500}
-            value={feeRate}
-            onChange={(e) => setFeeRate(Number(e.target.value))}
+            type="number" min={currSatVb ? Math.ceil(currSatVb * 1.1) : 1} max={1000}
+            value={feeRate} onChange={(e) => setFeeRate(Number(e.target.value))}
             className="w-full bg-neutral-800 border border-neutral-700 rounded-xl px-3 py-2 outline-none"
           />
           <div className="text-xs text-neutral-500 mt-1">
-            Recommended: {currentFeeRate ? Math.ceil(currentFeeRate * 1.5) : 20} sat/vB or higher
+            Recommended: {currSatVb ? Math.ceil(currSatVb * 1.5) : 20} sat/vB or higher (use wallet RBF/CPFP to actually change fees)
           </div>
         </div>
       </div>
-      
-      {result && (
-        <div className={`p-3 rounded-xl text-sm ${
-          result.success 
-            ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-300" 
-            : "bg-red-500/10 border border-red-500/20 text-red-300"
-        }`}>
-          {result.message}
+
+      {!!fees && (
+        <div className="rounded-xl border border-neutral-800 p-3 text-xs">
+          <div className="text-neutral-400 mb-1">mempool.space fees</div>
+          <ul className="space-y-1">
+            <li>Fastest: <b>{fees.fastestFee}</b> sat/vB</li>
+            <li>30 min: <b>{fees.halfHourFee}</b> sat/vB</li>
+            <li>60 min: <b>{fees.hourFee}</b> sat/vB</li>
+            <li>Minimum: <b>{fees.minimumFee}</b> sat/vB</li>
+          </ul>
         </div>
       )}
-      
+
+      {err && <div className="p-3 rounded-xl text-sm bg-red-500/10 border border-red-500/20 text-red-300">{err}</div>}
+
+      {result && (
+        <div className="rounded-xl border border-neutral-800 overflow-hidden">
+          <table className="w-full text-xs">
+            <thead className="bg-neutral-800 text-neutral-300">
+              <tr>
+                <th className="text-left p-2">Service</th>
+                <th className="text-left p-2">OK</th>
+                <th className="text-left p-2">Status</th>
+                <th className="text-left p-2">Message / Data</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(result.results).map(([name, r]) => (
+                <tr key={name} className="border-t border-neutral-800">
+                  <td className="p-2">{name}</td>
+                  <td className="p-2">{r?.ok ? "✅" : "❌"}</td>
+                  <td className="p-2">{r?.status ?? "—"}</td>
+                  <td className="p-2">
+                    <div className="max-w-[520px] whitespace-pre-wrap break-words text-neutral-300">
+                      {typeof r?.data === "string"
+                        ? r.data.slice(0, 400)
+                        : JSON.stringify(r?.data || r?.error || "", null, 2).slice(0, 400)}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="p-2 text-[11px] text-neutral-500">
+            Raw hex preview: {result.hexPreview}
+          </div>
+        </div>
+      )}
+
       <div className="flex gap-2">
         <button
           onClick={handleAccelerate}
           disabled={accelerating}
           className="bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-neutral-900 rounded-xl px-4 py-2 font-medium"
         >
-          {accelerating ? "Accelerating..." : "Accelerate Transaction"}
+          {accelerating ? "Rebroadcasting…" : "Rebroadcast to explorers"}
         </button>
-        <button
-          onClick={onCancel}
-          className="bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-xl px-4 py-2"
-        >
+        <button onClick={onCancel} className="bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-xl px-4 py-2">
           Cancel
         </button>
       </div>
+
+      <p className="text-[11px] text-neutral-500">
+        Rebroadcasting spreads your tx; it does <b>not</b> raise its fee. To truly speed up confirmation, use RBF (if replaceable) or CPFP.
+      </p>
     </div>
   );
 };
 
 const AccelerationHistory = ({ accelerations }) => {
-  if (!accelerations || accelerations.length === 0) {
-    return null;
-  }
-  
+  if (!accelerations || accelerations.length === 0) return null;
   return (
     <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900">
       <h3 className="text-sm font-semibold mb-3">Acceleration History</h3>
-      
       <div className="space-y-3">
         {accelerations.map((acc, index) => (
           <div key={index} className="p-3 bg-neutral-800/40 rounded-xl border border-neutral-700">
             <div className="flex justify-between items-start">
               <div>
                 <div className="text-xs font-mono">{shorten(acc.txid, 8, 4)}</div>
-                <div className="text-xs text-neutral-400">
-                  {new Date(acc.timestamp).toLocaleString()}
-                </div>
+                <div className="text-xs text-neutral-400">{new Date(acc.timestamp).toLocaleString()}</div>
               </div>
               <div className="text-right">
                 <div className="text-sm font-medium">{acc.feeRate} sat/vB</div>
-                <div className="text-xs text-neutral-400">
-                  Est: {acc.estimatedConfirmationTime} blocks
-                </div>
+                <div className="text-xs text-neutral-400">Est: {acc.estimatedConfirmationTime} blocks</div>
               </div>
             </div>
           </div>
@@ -279,7 +369,7 @@ export default function App() {
     balanceSats: null,
     receivedSats: null,
     sentSats: null,
-    usdPrice: null,
+    usdPrice: null, // current BTC/USD
   });
 
   const [txs, setTxs] = useState([]); // rawaddr list w/ I/O
@@ -317,8 +407,7 @@ export default function App() {
       if (!values.length) return null;
 
       const ts = Number(timestamp);
-      let best = null,
-        bestDiff = Infinity;
+      let best = null, bestDiff = Infinity;
       for (const v of values) {
         const diff = Math.abs(Number(v?.x || 0) - ts);
         if (diff < bestDiff) {
@@ -332,11 +421,10 @@ export default function App() {
     }
   };
 
-  /* ---- NEW: fetch address summary (balance, total received, total sent, USD price) ---- */
+  /* ---- NEW: fetch address summary (now we will display USD) ---- */
   async function fetchAddressSummary() {
     if (!address) return;
-    setAddrError("");
-    setAddrLoading(true);
+    setAddrError(""); setAddrLoading(true);
     setSummary({ balanceSats: null, receivedSats: null, sentSats: null, usdPrice: null });
 
     try {
@@ -355,10 +443,7 @@ export default function App() {
       const balanceSats = Number(balRes.data);
       const receivedSats = Number(recRes.data);
       const sentSats = Number(sentRes.data);
-      const usdPrice =
-        tickerRes?.data?.USD?.last ??
-        tickerRes?.data?.USD?.["15m"] ??
-        null;
+      const usdPrice = tickerRes?.data?.USD?.last ?? tickerRes?.data?.USD?.["15m"] ?? null;
 
       setSummary({
         balanceSats: Number.isFinite(balanceSats) ? balanceSats : null,
@@ -373,41 +458,24 @@ export default function App() {
     }
   }
 
-  /* ---- Fetch last 10 txs w/ I/O so we can compute real moved value ---- */
+  /* ---- Fetch last 10 txs w/ I/O ---- */
   async function fetchAddressTxs() {
     if (!address) return;
-    setError("");
-    setLoading(true);
-    setTxs([]);
-    setSelectedTxid("");
-    setBlockHeight(null);
-    setTipHeight(null);
-    setUsdDaily(null);
-    setTxSize(null);
+    setError(""); setLoading(true);
+    setTxs([]); setSelectedTxid("");
+    setBlockHeight(null); setTipHeight(null); setUsdDaily(null); setTxSize(null);
 
     try {
-      // in parallel with summary
       const txURL = `https://blockchain.info/rawaddr/${encodeURIComponent(address)}?limit=10&cors=true`;
       const [{ data }] = await Promise.all([axios.get(txURL, { timeout: 20000 }), fetchAddressSummary()]);
       const list = Array.isArray(data?.txs) ? data.txs : [];
 
       const mapped = list.map((t) => {
-        const outs = Array.isArray(t?.out)
-          ? t.out.map((o) => ({ addr: o?.addr || "", value: Number(o?.value || 0) }))
-          : [];
-        const ins = Array.isArray(t?.inputs)
-          ? t.inputs.map((i) => ({
-              addr: i?.prev_out?.addr || "",
-              value: Number(i?.prev_out?.value || 0),
-            }))
-          : [];
-        return {
-          hash: t?.hash || "",
-          time: Number(t?.time || 0),
-          fee: Number(t?.fee || 0),
-          outs,
-          ins,
-        };
+        const outs = Array.isArray(t?.out) ? t.out.map((o) => ({ addr: o?.addr || "", value: Number(o?.value || 0) })) : [];
+        const ins = Array.isArray(t?.inputs) ? t.inputs.map((i) => ({
+          addr: i?.prev_out?.addr || "", value: Number(i?.prev_out?.value || 0),
+        })) : [];
+        return { hash: t?.hash || "", time: Number(t?.time || 0), fee: Number(t?.fee || 0), outs, ins };
       });
 
       setTxs(mapped);
@@ -425,24 +493,18 @@ export default function App() {
     }
   }
 
-  /* ---- Hydrate selection: block height, tip, daily USD near date, size ---- */
+  /* ---- Hydrate selection: block height, tip, daily USD, size ---- */
   useEffect(() => {
     let ignore = false;
     async function hydrate() {
-      setBlockHeight(null);
-      setTipHeight(null);
-      setUsdDaily(null);
-      setTxSize(null);
+      setBlockHeight(null); setTipHeight(null); setUsdDaily(null); setTxSize(null);
       if (!selectedTx) return;
 
       try {
         const rawtxURL = `https://blockchain.info/rawtx/${encodeURIComponent(selectedTx.hash)}?cors=true`;
         const [{ data: txd }, tipRes] = await Promise.all([
           axios.get(rawtxURL, { timeout: 20000 }),
-          axios.get("https://blockchain.info/q/getblockcount?cors=true", {
-            timeout: 15000,
-            transformResponse: (x) => x,
-          }),
+          axios.get("https://blockchain.info/q/getblockcount?cors=true", { timeout: 15000, transformResponse: (x) => x }),
         ]);
         if (ignore) return;
 
@@ -451,22 +513,19 @@ export default function App() {
         setTipHeight(Number.isFinite(tip) ? tip : null);
 
         const sizeBytes =
-          typeof txd?.size === "number" ? txd.size : typeof txd?.weight === "number" ? Math.round(Number(txd.weight) / 4) : null;
+          typeof txd?.size === "number" ? txd.size :
+          typeof txd?.weight === "number" ? Math.round(Number(txd.weight) / 4) : null;
         setTxSize(sizeBytes);
 
         const price = await fetchUsdFromBlockchainCharts(selectedTx.time);
         setUsdDaily(price);
-      } catch (e) {
-        // swallow
-      }
+      } catch (e) {}
     }
     hydrate();
-    return () => {
-      ignore = true;
-    };
+    return () => { ignore = true; };
   }, [selectedTx]);
 
-  /* ---- Filtered tx list for dropdown ---- */
+  /* ---- Filtered tx list ---- */
   const filteredTxs = useMemo(() => {
     if (!txs.length) return [];
     return txs.filter((t) => {
@@ -477,13 +536,12 @@ export default function App() {
     });
   }, [txs, filterMode, address]);
 
-  /* ---- Compute the real "value when transacted" + extras ---- */
+  /* ---- Compute derived view ---- */
   const view = useMemo(() => {
     if (!selectedTx) return null;
-
     const outToAddr = selectedTx.outs?.reduce((a, o) => a + (o.addr === address ? o.value : 0), 0) || 0;
     const inFromAddr = selectedTx.ins?.reduce((a, i) => a + (i.addr === address ? i.value : 0), 0) || 0;
-    const isIncoming = outToAddr > 0 && inFromAddr === 0; // strict
+    const isIncoming = outToAddr > 0 && inFromAddr === 0;
     const outToOthers = selectedTx.outs?.reduce((a, o) => a + (o.addr !== address ? o.value : 0), 0) || 0;
 
     const valueSats = isIncoming ? outToAddr : outToOthers;
@@ -525,30 +583,22 @@ export default function App() {
     };
   }, [selectedTx, address, blockHeight, tipHeight, usdDaily, txSize]);
 
-  /* ---- NEW: Handle transaction acceleration ---- */
+  /* ---- Handle acceleration ---- */
   const handleAccelerate = (accelerationData) => {
-    setAccelerationHistory(prev => [...prev, accelerationData]);
+    setAccelerationHistory((prev) => [...prev, accelerationData]);
     setShowAcceleration(false);
   };
 
   /* ---- Copy & Screenshot ---- */
   async function copyTxid() {
     if (!view?.txid) return;
-    try {
-      await navigator.clipboard.writeText(view.txid);
-      alert("Transaction ID copied");
-    } catch {
-      alert("Copy failed");
-    }
+    try { await navigator.clipboard.writeText(view.txid); alert("Transaction ID copied"); }
+    catch { alert("Copy failed"); }
   }
   async function copyAddress() {
     if (!address) return;
-    try {
-      await navigator.clipboard.writeText(address);
-      alert("Address copied");
-    } catch {
-      alert("Copy failed");
-    }
+    try { await navigator.clipboard.writeText(address); alert("Address copied"); }
+    catch { alert("Copy failed"); }
   }
   async function downloadPNG() {
     if (!previewRef.current) return;
@@ -558,10 +608,20 @@ export default function App() {
       a.href = dataUrl;
       a.download = `btc-tx-${shorten(selectedTxid || "preview")}.png`;
       a.click();
-    } catch (e) {
+    } catch {
       alert("Could not generate screenshot.");
     }
   }
+
+  // Computed USD values for Address Summary
+  const balanceUsd =
+    summary.balanceSats != null && summary.usdPrice != null
+      ? satsToBtc(summary.balanceSats) * summary.usdPrice
+      : null;
+  const receivedUsd =
+    summary.receivedSats != null && summary.usdPrice != null
+      ? satsToBtc(summary.receivedSats) * summary.usdPrice
+      : null;
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
@@ -572,7 +632,9 @@ export default function App() {
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-400 to-yellow-600 grid place-items-center text-neutral-900 font-bold">₿</div>
             <div>
               <h1 className="text-lg font-semibold">BTC Transaction Screenshot Generator</h1>
-              <p className="text-xs text-neutral-400">Blockchain.com explorer + charts (USD) • iPhone/Samsung frame • PNG export • Transaction Acceleration</p>
+              <p className="text-xs text-neutral-400">
+                Blockchain.com explorer + charts (USD) • iPhone/Samsung frame • PNG export • Transaction Acceleration
+              </p>
             </div>
           </div>
 
@@ -642,7 +704,7 @@ export default function App() {
             {error && <div className="text-sm text-red-400 bg-red-950/40 border border-red-800 rounded-xl px-3 py-2">{error}</div>}
           </div>
 
-          {/* Address Summary card */}
+          {/* Address Summary card (USD-focused) */}
           <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold">Address Summary</h2>
@@ -661,10 +723,7 @@ export default function App() {
                 <div>
                   <div className="text-neutral-400">Current Balance</div>
                   <div className="font-medium">
-                    {summary.balanceSats == null || summary.usdPrice == null 
-                      ? "—" 
-                      : fmtUSD(satsToBtc(summary.balanceSats) * summary.usdPrice)
-                    }
+                    {balanceUsd == null ? "—" : fmtUSD(balanceUsd)}
                   </div>
                   <div className="text-neutral-400 text-xs">
                     {summary.balanceSats == null ? "" : `${fmtBtc(satsToBtc(summary.balanceSats))} BTC`}
@@ -683,10 +742,7 @@ export default function App() {
                 <div>
                   <div className="text-neutral-400">Total Received</div>
                   <div className="font-medium">
-                    {summary.receivedSats == null || summary.usdPrice == null 
-                      ? "—" 
-                      : fmtUSD(satsToBtc(summary.receivedSats) * summary.usdPrice)
-                    }
+                    {receivedUsd == null ? "—" : fmtUSD(receivedUsd)}
                   </div>
                   <div className="text-neutral-400 text-xs">
                     {summary.receivedSats == null ? "" : `${fmtBtc(satsToBtc(summary.receivedSats))} BTC`}
@@ -695,10 +751,9 @@ export default function App() {
                 <div>
                   <div className="text-neutral-400">Total Sent</div>
                   <div className="font-medium">
-                    {summary.sentSats == null || summary.usdPrice == null 
-                      ? "—" 
-                      : fmtUSD(satsToBtc(summary.sedSats) * summary.usdPrice)
-                    }
+                    {summary.sentSats == null || summary.usdPrice == null
+                      ? (summary.sentSats == null ? "—" : `${summary.sentSats.toLocaleString()} sats`)
+                      : fmtUSD(satsToBtc(summary.sentSats) * summary.usdPrice)}
                   </div>
                   <div className="text-neutral-400 text-xs">
                     {summary.sentSats == null ? "" : `${fmtBtc(satsToBtc(summary.sentSats))} BTC`}
@@ -753,13 +808,13 @@ export default function App() {
                 <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900">
                   <h3 className="text-sm font-semibold mb-3">Transaction Acceleration</h3>
                   <p className="text-xs text-neutral-400 mb-3">
-                    This transaction is still confirming. You can accelerate it by paying a higher fee.
+                    This transaction is still confirming. You can rebroadcast it to more nodes for better propagation.
                   </p>
                   <button
                     onClick={() => setShowAcceleration(true)}
                     className="bg-amber-500 hover:bg-amber-400 text-neutral-900 rounded-xl px-4 py-2 font-medium"
                   >
-                    Accelerate Transaction
+                    Accelerate (Rebroadcast)
                   </button>
                 </div>
               )}
@@ -868,7 +923,7 @@ export default function App() {
                           <span className="font-mono text-sm text-neutral-300">{view?.txid ? shorten(view.txid, 12, 6) : "—"}</span>
                           <button onClick={copyTxid} disabled={!view?.txid} className="text-blue-400 hover:text-blue-300 text-sm disabled:opacity-50">
                             Copy Transaction ID
-                            </button>
+                          </button>
                         </div>
                       </dd>
                     </div>
