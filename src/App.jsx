@@ -5,6 +5,47 @@ import { toPng } from "html-to-image";
 // No cookies (helps with CORS)
 axios.defaults.withCredentials = false;
 
+/* ---------------- tiny toast system (Gen-Z Naija vibes) ---------------- */
+function useToasts() {
+  const [toasts, setToasts] = useState([]);
+  const addToast = (text, type = "info", timeout = 4200) => {
+    const id = Math.random().toString(36).slice(2, 9);
+    setToasts((t) => [...t, { id, text, type }]);
+    if (timeout) setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), timeout);
+  };
+  const removeToast = (id) => setToasts((t) => t.filter((x) => x.id !== id));
+  return { toasts, addToast, removeToast };
+}
+
+const Toasts = ({ toasts, onClose }) => (
+  <div className="fixed z-[9999] bottom-4 right-4 flex flex-col gap-2 max-w-sm">
+    {toasts.map((t) => (
+      <div
+        key={t.id}
+        className={[
+          "rounded-xl border px-3 py-2 shadow-lg text-sm backdrop-blur",
+          t.type === "success"
+            ? "bg-emerald-500/10 border-emerald-700 text-emerald-200"
+            : t.type === "error"
+            ? "bg-rose-500/10 border-rose-700 text-rose-200"
+            : "bg-neutral-800/70 border-neutral-700 text-neutral-100",
+        ].join(" ")}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <span>{t.text}</span>
+          <button
+            onClick={() => onClose(t.id)}
+            className="text-xs opacity-80 hover:opacity-100"
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+    ))}
+  </div>
+);
+
 /* ---------------- helpers ---------------- */
 const satsToBtc = (s) => Number(s || 0) / 1e8;
 const fmtBtc = (n) =>
@@ -21,6 +62,42 @@ const fmtDateTime = (unix) =>
   });
 const shorten = (s, head = 12, tail = 6) =>
   !s ? "" : s.length <= head + tail + 3 ? s : `${s.slice(0, head)}..${s.slice(-tail)}`;
+
+/* quick input detectors */
+const isLikelyTxid = (s) => !!s && /^[0-9a-fA-F]{64}$/.test(s.trim());
+const isLikelyBtcAddress = (s) =>
+  !!s && /^(bc1[a-z0-9]{10,}|[13][a-km-zA-HJ-NP-Z1-9]{20,})$/.test(s.trim()); // basic bech32/legacy check
+
+/* make spicy Naija-style error messages */
+function friendlyError(e, input, where = "address") {
+  const status = e?.response?.status;
+  const raw = e?.response?.data?.message || e?.response?.data || e?.message || "";
+  const rawLower = String(raw).toLowerCase();
+
+  if (isLikelyTxid(input) && where === "address") {
+    return "Oga, that one na TXID, no be address 😅. Paste a Bitcoin address (bc1…, 1…, 3…) to load history.";
+  }
+  if (!isLikelyBtcAddress(input) && where === "address") {
+    return "Boss, this address no correct. Make sure e start with bc1…, 1… or 3…, no spaces.";
+  }
+  if (status === 404 || rawLower.includes("item not found")) {
+    return "We no see this address for explorer o. Abeg cross-check am and try again.";
+  }
+  if (status === 400 || rawLower.includes("argument invalid")) {
+    return "Format no pure. Use valid Bitcoin address, no typos, no emojis.";
+  }
+  if (status === 429) {
+    return "Chill small—too many requests. Give am few seconds, try again.";
+  }
+  if (e?.code === "ECONNABORTED" || rawLower.includes("timeout")) {
+    return "Network dey do shakara. Check your internet or try later.";
+  }
+  if (rawLower.includes("network error")) {
+    return "Network wahala. One more try go solve am.";
+  }
+  const hint = raw ? ` (${String(raw).slice(0, 80)})` : "";
+  return `Something no gel. Try again in a bit.${hint}`;
+}
 
 /* date utils for Blockchain.com chart API */
 const ymd = (d) => d.toISOString().slice(0, 10);
@@ -120,10 +197,7 @@ async function getMempoolFees() {
 }
 
 /* ---------------- Browser-friendly rebroadcaster ---------------- */
-const ESPLORA_TARGETS = [
-  "https://mempool.space/api/tx",
-  "https://blockstream.info/api/tx",
-];
+const ESPLORA_TARGETS = ["https://mempool.space/api/tx", "https://blockstream.info/api/tx"];
 
 async function broadcastEverywhere({ rawHex }) {
   const results = {};
@@ -131,16 +205,12 @@ async function broadcastEverywhere({ rawHex }) {
   // Blockchain.com (form-encoded + ?cors=true)
   try {
     const body = new URLSearchParams({ tx: rawHex }).toString();
-    const { data, status } = await axios.post(
-      "https://blockchain.info/pushtx?cors=true",
-      body,
-      {
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        timeout: 20000,
-        validateStatus: () => true,
-        withCredentials: false,
-      }
-    );
+    const { data, status } = await axios.post("https://blockchain.info/pushtx?cors=true", body, {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      timeout: 20000,
+      validateStatus: () => true,
+      withCredentials: false,
+    });
     results["blockchain.info"] = { ok: status >= 200 && status < 300, status, data };
   } catch (e) {
     results["blockchain.info"] = { ok: false, status: null, error: e?.message || "request failed" };
@@ -150,16 +220,12 @@ async function broadcastEverywhere({ rawHex }) {
   for (const url of ESPLORA_TARGETS) {
     const name = new URL(url).hostname;
     try {
-      const { data, status } = await axios.post(
-        url,
-        rawHex,
-        {
-          headers: { "Content-Type": "text/plain" },
-          timeout: 20000,
-          validateStatus: () => true,
-          withCredentials: false,
-        }
-      );
+      const { data, status } = await axios.post(url, rawHex, {
+        headers: { "Content-Type": "text/plain" },
+        timeout: 20000,
+        validateStatus: () => true,
+        withCredentials: false,
+      });
       results[name] = { ok: status >= 200 && status < 300, status, data };
     } catch (e) {
       results[name] = { ok: false, status: null, error: e?.message || "request failed" };
@@ -170,7 +236,7 @@ async function broadcastEverywhere({ rawHex }) {
 }
 
 /* ---------------- Acceleration (rebroadcast) UI ---------------- */
-const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
+const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel, addToast }) => {
   const [feeRate, setFeeRate] = useState(currentFeeRate ? Math.ceil(currentFeeRate * 1.5) : 20);
   const [accelerating, setAccelerating] = useState(false);
   const [result, setResult] = useState(null);
@@ -186,26 +252,36 @@ const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
         if (ignore) return;
         setFees(f || null);
         setMeta(m || null);
-        if (m?.fee && m?.vsize && !currentFeeRate) {
-          setFeeRate(Math.ceil((m.fee / m.vsize) * 1.5));
-        }
-      } catch (_) {}
+        if (m?.fee && m?.vsize && !currentFeeRate) setFeeRate(Math.ceil((m.fee / m.vsize) * 1.5));
+      } catch {}
     })();
-    return () => { ignore = true; };
+    return () => {
+      ignore = true;
+    };
   }, [txid]);
 
   const handleAccelerate = async () => {
-    setAccelerating(true); setErr(""); setResult(null);
+    setAccelerating(true);
+    setErr("");
+    setResult(null);
+    addToast?.("We don dey rebroadcast your TX—make mempool hear am. 🔊", "info");
+
     try {
-      const m = meta || await getMempoolTxMeta(txid);
+      const m = meta || (await getMempoolTxMeta(txid));
       if (m?.confirmed) {
-        setErr("This transaction is already confirmed. Rebroadcasting is not needed.");
+        const msg = "This transaction don confirm already—no need to rebroadcast. ✅";
+        setErr(msg);
+        addToast?.(msg, "success");
         setAccelerating(false);
         return;
       }
       const hex = await getMempoolHex(txid);
       const results = await broadcastEverywhere({ rawHex: hex });
       setResult({ results, txid, hexPreview: shorten(hex, 12, 8) });
+
+      const okCount = Object.values(results).filter((r) => r?.ok).length;
+      const total = Object.keys(results).length;
+      addToast?.(`Rebroadcast done: ${okCount}/${total} endpoints gree. ✨`, okCount ? "success" : "error");
 
       onAccelerate({
         txid,
@@ -215,13 +291,15 @@ const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
         estimatedConfirmationTime: Math.floor(Math.random() * 6) + 1,
       });
     } catch (e) {
-      setErr(e?.response?.data || e?.message || "Rebroadcast failed");
+      const msg = e?.response?.data || e?.message || "Rebroadcast failed";
+      setErr(msg);
+      addToast?.("Rebroadcast fail—network dey whine. Try again soon.", "error");
     } finally {
       setAccelerating(false);
     }
   };
 
-  const currSatVb = meta?.fee && meta?.vsize ? (meta.fee / meta.vsize) : currentFeeRate;
+  const currSatVb = meta?.fee && meta?.vsize ? meta.fee / meta.vsize : currentFeeRate;
 
   return (
     <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900 space-y-4">
@@ -239,12 +317,15 @@ const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
         <div>
           <label className="block text-xs text-neutral-400 mb-1">Target Fee Rate (UI hint)</label>
           <input
-            type="number" min={currSatVb ? Math.ceil(currSatVb * 1.1) : 1} max={1000}
-            value={feeRate} onChange={(e) => setFeeRate(Number(e.target.value))}
+            type="number"
+            min={currSatVb ? Math.ceil(currSatVb * 1.1) : 1}
+            max={1000}
+            value={feeRate}
+            onChange={(e) => setFeeRate(Number(e.target.value))}
             className="w-full bg-neutral-800 border border-neutral-700 rounded-xl px-3 py-2 outline-none"
           />
           <div className="text-xs text-neutral-500 mt-1">
-            Rebroadcasting doesn’t raise fees. Use <b>RBF</b> (if replaceable) or <b>CPFP</b> to truly speed up.
+            Rebroadcasting no dey raise fees. Use <b>RBF</b> (if replaceable) or <b>CPFP</b> to truly speed up.
           </div>
         </div>
       </div>
@@ -253,15 +334,27 @@ const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
         <div className="rounded-xl border border-neutral-800 p-3 text-xs">
           <div className="text-neutral-400 mb-1">mempool.space fee guide</div>
           <ul className="space-y-1">
-            <li>Fastest: <b>{fees.fastestFee}</b> sat/vB</li>
-            <li>~30 min: <b>{fees.halfHourFee}</b> sat/vB</li>
-            <li>~60 min: <b>{fees.hourFee}</b> sat/vB</li>
-            <li>Minimum: <b>{fees.minimumFee}</b> sat/vB</li>
+            <li>
+              Fastest: <b>{fees.fastestFee}</b> sat/vB
+            </li>
+            <li>
+              ~30 min: <b>{fees.halfHourFee}</b> sat/vB
+            </li>
+            <li>
+              ~60 min: <b>{fees.hourFee}</b> sat/vB
+            </li>
+            <li>
+              Minimum: <b>{fees.minimumFee}</b> sat/vB
+            </li>
           </ul>
         </div>
       )}
 
-      {err && <div className="p-3 rounded-xl text-sm bg-red-500/10 border border-red-500/20 text-red-300">{String(err).slice(0, 600)}</div>}
+      {err && (
+        <div className="p-3 rounded-xl text-sm bg-red-500/10 border border-red-500/20 text-red-300">
+          {String(err).slice(0, 600)}
+        </div>
+      )}
 
       {result && (
         <div className="rounded-xl border border-neutral-800 overflow-hidden">
@@ -343,6 +436,8 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const { toasts, addToast, removeToast } = useToasts();
+
   // Address Summary state
   const [addrLoading, setAddrLoading] = useState(false);
   const [addrError, setAddrError] = useState("");
@@ -388,10 +483,14 @@ export default function App() {
       if (!values.length) return null;
 
       const ts = Number(timestamp);
-      let best = null, bestDiff = Infinity;
+      let best = null,
+        bestDiff = Infinity;
       for (const v of values) {
         const diff = Math.abs(Number(v?.x || 0) - ts);
-        if (diff < bestDiff) { bestDiff = diff; best = v; }
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          best = v;
+        }
       }
       return typeof best?.y === "number" ? best.y : null;
     } catch {
@@ -402,7 +501,8 @@ export default function App() {
   /* ---- Address summary ---- */
   async function fetchAddressSummary() {
     if (!address) return;
-    setAddrError(""); setAddrLoading(true);
+    setAddrError("");
+    setAddrLoading(true);
     setSummary({ balanceSats: null, receivedSats: null, sentSats: null, usdPrice: null });
 
     try {
@@ -430,7 +530,7 @@ export default function App() {
         usdPrice: Number.isFinite(usdPrice) ? usdPrice : null,
       });
     } catch (e) {
-      setAddrError(e?.message || "Failed to load address summary.");
+      setAddrError(friendlyError(e, address, "address"));
     } finally {
       setAddrLoading(false);
     }
@@ -439,9 +539,25 @@ export default function App() {
   /* ---- Fetch last 10 txs ---- */
   async function fetchAddressTxs() {
     if (!address) return;
-    setError(""); setLoading(true);
-    setTxs([]); setSelectedTxid("");
-    setBlockHeight(null); setTipHeight(null); setUsdDaily(null); setTxSize(null);
+    setError("");
+    setLoading(true);
+    setTxs([]);
+    setSelectedTxid("");
+    setBlockHeight(null);
+    setTipHeight(null);
+    setUsdDaily(null);
+    setTxSize(null);
+
+    addToast("Hold on small—we dey pull your address gist… 🔎", "info");
+
+    // Guard early for obvious TXID misuse
+    if (isLikelyTxid(address) && !isLikelyBtcAddress(address)) {
+      const msg = friendlyError({ response: {} }, address, "address");
+      setError(msg);
+      addToast(msg, "error");
+      setLoading(false);
+      return;
+    }
 
     try {
       const txURL = `https://blockchain.info/rawaddr/${encodeURIComponent(address)}?limit=10&cors=true`;
@@ -449,10 +565,15 @@ export default function App() {
       const list = Array.isArray(data?.txs) ? data.txs : [];
 
       const mapped = list.map((t) => {
-        const outs = Array.isArray(t?.out) ? t.out.map((o) => ({ addr: o?.addr || "", value: Number(o?.value || 0) })) : [];
-        const ins = Array.isArray(t?.inputs) ? t.inputs.map((i) => ({
-          addr: i?.prev_out?.addr || "", value: Number(i?.prev_out?.value || 0),
-        })) : [];
+        const outs = Array.isArray(t?.out)
+          ? t.out.map((o) => ({ addr: o?.addr || "", value: Number(o?.value || 0) }))
+          : [];
+        const ins = Array.isArray(t?.inputs)
+          ? t.inputs.map((i) => ({
+              addr: i?.prev_out?.addr || "",
+              value: Number(i?.prev_out?.value || 0),
+            }))
+          : [];
         return { hash: t?.hash || "", time: Number(t?.time || 0), fee: Number(t?.fee || 0), outs, ins };
       });
 
@@ -464,8 +585,18 @@ export default function App() {
         return true;
       });
       if (first) setSelectedTxid(first.hash);
+
+      if (!mapped.length) {
+        const msg = "Area still dry—no transactions for this address yet.";
+        setError(msg);
+        addToast(msg, "info");
+      } else {
+        addToast(`We don load ${mapped.length} transaction${mapped.length > 1 ? "s" : ""}. ✨`, "success");
+      }
     } catch (e) {
-      setError(e?.response?.data?.message || e?.message || "Failed to fetch transactions.");
+      const msg = friendlyError(e, address, "address");
+      setError(msg);
+      addToast(msg, "error");
     } finally {
       setLoading(false);
     }
@@ -475,14 +606,20 @@ export default function App() {
   useEffect(() => {
     let ignore = false;
     async function hydrate() {
-      setBlockHeight(null); setTipHeight(null); setUsdDaily(null); setTxSize(null);
+      setBlockHeight(null);
+      setTipHeight(null);
+      setUsdDaily(null);
+      setTxSize(null);
       if (!selectedTx) return;
 
       try {
         const rawtxURL = `https://blockchain.info/rawtx/${encodeURIComponent(selectedTx.hash)}?cors=true`;
         const [{ data: txd }, tipRes] = await Promise.all([
           axios.get(rawtxURL, { timeout: 20000 }),
-          axios.get("https://blockchain.info/q/getblockcount?cors=true", { timeout: 15000, transformResponse: (x) => x }),
+          axios.get("https://blockchain.info/q/getblockcount?cors=true", {
+            timeout: 15000,
+            transformResponse: (x) => x,
+          }),
         ]);
         if (ignore) return;
 
@@ -491,16 +628,17 @@ export default function App() {
         setTipHeight(Number.isFinite(tip) ? tip : null);
 
         const sizeBytes =
-          typeof txd?.size === "number" ? txd.size :
-          typeof txd?.weight === "number" ? Math.round(Number(txd.weight) / 4) : null;
+          typeof txd?.size === "number" ? txd.size : typeof txd?.weight === "number" ? Math.round(Number(txd.weight) / 4) : null;
         setTxSize(sizeBytes);
 
         const price = await fetchUsdFromBlockchainCharts(selectedTx.time);
         setUsdDaily(price);
-      } catch (e) {}
+      } catch {}
     }
     hydrate();
-    return () => { ignore = true; };
+    return () => {
+      ignore = true;
+    };
   }, [selectedTx]);
 
   /* ---- Filtered tx list ---- */
@@ -529,14 +667,8 @@ export default function App() {
 
     const conf = blockHeight == null || tipHeight == null ? 0 : Math.max(0, tipHeight - blockHeight + 1);
 
-    // NEW: Three-phrase status
-    const statusPhrase =
-      conf === 0
-        ? "Pending"
-        : conf >= TARGET_CONF
-        ? "Completed"
-        : `Confirming ${conf}/${TARGET_CONF}`;
-
+    // Three-phrase status
+    const statusPhrase = conf === 0 ? "Pending" : conf >= TARGET_CONF ? "Completed" : `Confirming ${conf}/${TARGET_CONF}`;
     const confLabel = `${Math.min(conf, TARGET_CONF)}/${TARGET_CONF} confirmations`;
 
     const amountUsd = usdDaily != null ? amountBtc * usdDaily : null;
@@ -557,7 +689,7 @@ export default function App() {
       feeBtc,
       feeUsd,
       feeRate,
-      statusPhrase,     // <— use instead of old labels
+      statusPhrase,
       confLabel,
       confRaw: conf,
       timeLabel: fmtDateTime(selectedTx.time),
@@ -579,40 +711,44 @@ export default function App() {
   /* ---- Copy & Screenshot ---- */
   async function copyTxid() {
     if (!view?.txid) return;
-    try { await navigator.clipboard.writeText(view.txid); alert("Transaction ID copied"); }
-    catch { alert("Copy failed"); }
+    try {
+      await navigator.clipboard.writeText(view.txid);
+      addToast("TXID don enter clipboard. Baba, you sabi! 📋", "success");
+    } catch {
+      addToast("Copy fail—try again small. 😬", "error");
+    }
   }
   async function copyAddress() {
     if (!address) return;
-    try { await navigator.clipboard.writeText(address); alert("Address copied"); }
-    catch { alert("Copy failed"); }
+    try {
+      await navigator.clipboard.writeText(address);
+      addToast("Address don copy. You fit paste am anywhere now. 📋", "success");
+    } catch {
+      addToast("Copy fail—try again small. 😬", "error");
+    }
   }
   async function downloadPNG() {
     if (!previewRef.current) return;
     try {
+      addToast("Saving screenshot—hold on small… 📸", "info");
       const dataUrl = await toPng(previewRef.current, { pixelRatio: 2, cacheBust: true });
       const a = document.createElement("a");
       a.href = dataUrl;
       a.download = `btc-tx-${shorten(selectedTxid || "preview")}.png`;
       a.click();
+      addToast("PNG saved. Check your downloads. 😉", "success");
     } catch {
-      alert("Could not generate screenshot.");
+      addToast("Could not generate screenshot—e be like say canvas dey vex. 😵‍💫", "error");
     }
   }
 
   // USD values for Address Summary
   const balanceUsd =
-    summary.balanceSats != null && summary.usdPrice != null
-      ? satsToBtc(summary.balanceSats) * summary.usdPrice
-      : null;
+    summary.balanceSats != null && summary.usdPrice != null ? satsToBtc(summary.balanceSats) * summary.usdPrice : null;
   const receivedUsd =
-    summary.receivedSats != null && summary.usdPrice != null
-      ? satsToBtc(summary.receivedSats) * summary.usdPrice
-      : null;
+    summary.receivedSats != null && summary.usdPrice != null ? satsToBtc(summary.receivedSats) * summary.usdPrice : null;
   const sentUsd =
-    summary.sentSats != null && summary.usdPrice != null
-      ? satsToBtc(summary.sentSats) * summary.usdPrice
-      : null;
+    summary.sentSats != null && summary.usdPrice != null ? satsToBtc(summary.sentSats) * summary.usdPrice : null;
 
   // status chip + bar color classes based on phrase
   const statusChipClasses = (phrase) =>
@@ -628,11 +764,16 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
+      {/* Toasts */}
+      <Toasts toasts={toasts} onClose={removeToast} />
+
       {/* Header */}
       <header className="sticky top-0 z-10 bg-neutral-950/80 backdrop-blur border-b border-neutral-800">
         <div className="max-w-5xl mx-auto px-4 py-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-400 to-yellow-600 grid place-items-center text-neutral-900 font-bold">₿</div>
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-400 to-yellow-600 grid place-items-center text-neutral-900 font-bold">
+              ₿
+            </div>
             <div>
               <h1 className="text-lg font-semibold">BTC Transaction Screenshot Generator</h1>
               <p className="text-xs text-neutral-400">
@@ -681,7 +822,7 @@ export default function App() {
                 <span className="block text-xs text-neutral-400 mb-1">Bitcoin Address</span>
                 <input
                   className="w-full bg-neutral-800 border border-neutral-700 rounded-xl px-3 py-2 outline-none placeholder:text-neutral-500"
-                  placeholder="bc1q... (paste address)"
+                  placeholder="bc1… / 1… / 3… (paste address — not TXID)"
                   value={address}
                   onChange={(e) => setAddress(e.target.value.trim())}
                   spellCheck={false}
@@ -704,7 +845,11 @@ export default function App() {
                 </button>
               </div>
             </div>
-            {error && <div className="text-sm text-red-400 bg-red-950/40 border border-red-800 rounded-xl px-3 py-2">{error}</div>}
+            {error && (
+              <div className="text-sm text-red-300 bg-red-950/40 border border-red-800 rounded-xl px-3 py-2">
+                {error}
+              </div>
+            )}
           </div>
 
           {/* Address Summary (USD first) */}
@@ -714,7 +859,11 @@ export default function App() {
               {addrLoading && <span className="text-xs text-neutral-400">Loading…</span>}
             </div>
 
-            {addrError && <div className="mt-2 text-xs text-red-400 bg-red-950/40 border border-red-800 rounded-xl px-3 py-2">{addrError}</div>}
+            {addrError && (
+              <div className="mt-2 text-xs text-red-300 bg-red-950/40 border border-red-800 rounded-xl px-3 py-2">
+                {addrError}
+              </div>
+            )}
 
             <div className="mt-3 grid grid-cols-1 gap-3 text-sm">
               <div className="bg-neutral-850/40 border border-neutral-800 rounded-xl p-3">
@@ -725,18 +874,14 @@ export default function App() {
               <div className="bg-neutral-850/40 border border-neutral-800 rounded-xl p-3 grid grid-cols-2 gap-3">
                 <div>
                   <div className="text-neutral-400">Current Balance</div>
-                  <div className="font-medium">
-                    {balanceUsd == null ? "—" : fmtUSD(balanceUsd)}
-                  </div>
+                  <div className="font-medium">{balanceUsd == null ? "—" : fmtUSD(balanceUsd)}</div>
                   <div className="text-neutral-400 text-xs">
                     {summary.balanceSats == null ? "" : `${fmtBtc(satsToBtc(summary.balanceSats))} BTC`}
                   </div>
                 </div>
                 <div>
                   <div className="text-neutral-400">BTC Price (USD)</div>
-                  <div className="font-medium">
-                    {summary.usdPrice == null ? "—" : fmtUSD(summary.usdPrice)}
-                  </div>
+                  <div className="font-medium">{summary.usdPrice == null ? "—" : fmtUSD(summary.usdPrice)}</div>
                   <div className="text-neutral-400 text-xs">Source: blockchain.info/ticker</div>
                 </div>
               </div>
@@ -744,18 +889,14 @@ export default function App() {
               <div className="bg-neutral-850/40 border border-neutral-800 rounded-xl p-3 grid grid-cols-2 gap-3">
                 <div>
                   <div className="text-neutral-400">Total Received</div>
-                  <div className="font-medium">
-                    {receivedUsd == null ? "—" : fmtUSD(receivedUsd)}
-                  </div>
+                  <div className="font-medium">{receivedUsd == null ? "—" : fmtUSD(receivedUsd)}</div>
                   <div className="text-neutral-400 text-xs">
                     {summary.receivedSats == null ? "" : `${fmtBtc(satsToBtc(summary.receivedSats))} BTC`}
                   </div>
                 </div>
                 <div>
                   <div className="text-neutral-400">Total Sent</div>
-                  <div className="font-medium">
-                    {sentUsd == null ? "—" : fmtUSD(sentUsd)}
-                  </div>
+                  <div className="font-medium">{sentUsd == null ? "—" : fmtUSD(sentUsd)}</div>
                   <div className="text-neutral-400 text-xs">
                     {summary.sentSats == null ? "" : `${fmtBtc(satsToBtc(summary.sentSats))} BTC`}
                   </div>
@@ -804,6 +945,7 @@ export default function App() {
                   currentFeeRate={view?.feeRate}
                   onAccelerate={handleAccelerate}
                   onCancel={() => setShowAcceleration(false)}
+                  addToast={addToast}
                 />
               ) : (
                 <div className="p-4 rounded-2xl border border-neutral-800 bg-neutral-900">
@@ -837,12 +979,12 @@ export default function App() {
           </div>
 
           <p className="text-[11px] text-neutral-500">
-            Amount = <b>real value moved</b> (incoming: outputs to your address; outgoing: outputs to others). USD uses
-            Blockchain.com daily market price near the transaction date.
+            Amount = <b>real value moved</b> (incoming: outputs to your address; outgoing: outputs to others). USD uses Blockchain.com
+            daily market price near the transaction date.
           </p>
         </section>
 
-        {/* Device + Wallet Sheet (PREVIOUS DESIGN, with new phrases) */}
+        {/* Device + Wallet Sheet (with three-phrase status) */}
         <section className="flex items-start justify-center">
           <DeviceFrame device={device} ref={previewRef}>
             <div className="min-h-full bg-neutral-900">
@@ -850,7 +992,13 @@ export default function App() {
                 {/* header gradient + close */}
                 <div className="relative">
                   <div className="h-10 bg-gradient-to-r from-purple-700/60 to-blue-600/55" />
-                  <button className="absolute right-3 -top-3 w-7 h-7 rounded-full bg-neutral-800/90 text-neutral-300 grid place-items-center border border-neutral-700" aria-label="Close">✕</button>
+                  <button
+                    className="absolute right-3 -top-3 w-7 h-7 rounded-full bg-neutral-800/90 text-neutral-300 grid place-items-center border border-neutral-700"
+                    aria-label="Close"
+                    onClick={() => addToast("We dey here for you. 😉", "info")}
+                  >
+                    ✕
+                  </button>
                 </div>
 
                 {/* title / status */}
@@ -883,16 +1031,16 @@ export default function App() {
                       <dd className="text-right">
                         <div className="font-medium">{fmtBtc(view?.feeBtc || 0)} BTC</div>
                         <div className="text-neutral-400 text-sm">{view?.feeUsd != null ? fmtUSD(view.feeUsd) : "—"}</div>
-                        {view?.feeRate != null && <div className="text-neutral-500 text-xs mt-1">{view.feeRate.toFixed(1)} sat/vB</div>}
+                        {view?.feeRate != null && (
+                          <div className="text-neutral-500 text-xs mt-1">{view.feeRate.toFixed(1)} sat/vB</div>
+                        )}
                       </dd>
                     </div>
 
                     <div className="px-4 py-3">
                       <dt className="flex items-center justify-between">
                         <span className="text-neutral-400">Status</span>
-                        <span className={statusChipClasses(view?.statusPhrase || "")}>
-                          {view?.statusPhrase || "—"}
-                        </span>
+                        <span className={statusChipClasses(view?.statusPhrase || "")}>{view?.statusPhrase || "—"}</span>
                       </dt>
                       <dd>
                         <div className="text-neutral-400 text-sm mt-1">{view?.confLabel || "—"}</div>
@@ -914,8 +1062,14 @@ export default function App() {
                       <dt className="text-neutral-400">Transaction ID</dt>
                       <dd>
                         <div className="mt-1 flex items-center justify-between">
-                          <span className="font-mono text-sm text-neutral-300">{view?.txid ? shorten(view.txid, 12, 6) : "—"}</span>
-                          <button onClick={copyTxid} disabled={!view?.txid} className="text-blue-400 hover:text-blue-300 text-sm disabled:opacity-50">
+                          <span className="font-mono text-sm text-neutral-300">
+                            {view?.txid ? shorten(view.txid, 12, 6) : "—"}
+                          </span>
+                          <button
+                            onClick={copyTxid}
+                            disabled={!view?.txid}
+                            className="text-blue-400 hover:text-blue-300 text-sm disabled:opacity-50"
+                          >
                             Copy Transaction ID
                           </button>
                         </div>
@@ -930,7 +1084,10 @@ export default function App() {
                     target="_blank"
                     rel="noreferrer"
                     className="block text-center rounded-full bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-medium py-3"
-                    onClick={(e) => !view?.txid && e.preventDefault()}
+                    onClick={(e) => {
+                      if (!view?.txid) e.preventDefault();
+                      else addToast("Opening explorer—no wahala. 🌐", "info");
+                    }}
                   >
                     View on Explorer
                   </a>
