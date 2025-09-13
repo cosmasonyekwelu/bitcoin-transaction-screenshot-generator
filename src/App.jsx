@@ -99,26 +99,42 @@ const DeviceFrame = forwardRef(function DeviceFrame({ device = "iphone", childre
 /* ---------------- Browser-only acceleration helpers ---------------- */
 // CORS-friendly GETs to mempool.space for metadata + hex
 async function getMempoolTxMeta(txid) {
-  const { data } = await axios.get(`https://mempool.space/api/tx/${encodeURIComponent(txid)}`, { timeout: 15000 });
-  return {
-    fee: typeof data?.fee === "number" ? data.fee : null,
-    vsize: typeof data?.vsize === "number" ? data.vsize : null,
-    replaceable: !!(data?.status?.replaceable),
-    confirmed: !!(data?.status?.confirmed),
-  };
-}
-async function getMempoolHex(txid) {
-  const { data } = await axios.get(`https://mempool.space/api/tx/${encodeURIComponent(txid)}/hex`, { timeout: 15000 });
-  if (!data || typeof data !== "string" || !/^[0-9a-fA-F]+$/.test(data)) throw new Error("Could not get raw hex");
-  return data.trim();
-}
-async function getMempoolFees() {
-  const { data } = await axios.get(`https://mempool.space/api/v1/fees/recommended`, { timeout: 15000 });
-  return data || null;
+  try {
+    const { data } = await axios.get(`https://mempool.space/api/tx/${encodeURIComponent(txid)}`, { timeout: 15000 });
+    return {
+      fee: typeof data?.fee === "number" ? data.fee : null,
+      vsize: typeof data?.vsize === "number" ? data.vsize : null,
+      replaceable: !!(data?.status?.replaceable),
+      confirmed: !!(data?.status?.confirmed),
+    };
+  } catch (error) {
+    console.error("Error fetching mempool transaction metadata:", error);
+    return null;
+  }
 }
 
-/* ---------------- Your requested broadcaster (verbatim) ---------------- */
-// Browser-friendly fan-out broadcaster
+async function getMempoolHex(txid) {
+  try {
+    const { data } = await axios.get(`https://mempool.space/api/tx/${encodeURIComponent(txid)}/hex`, { timeout: 15000 });
+    if (!data || typeof data !== "string" || !/^[0-9a-fA-F]+$/.test(data)) throw new Error("Could not get raw hex");
+    return data.trim();
+  } catch (error) {
+    console.error("Error fetching transaction hex:", error);
+    throw error;
+  }
+}
+
+async function getMempoolFees() {
+  try {
+    const { data } = await axios.get(`https://mempool.space/api/v1/fees/recommended`, { timeout: 15000 });
+    return data || null;
+  } catch (error) {
+    console.error("Error fetching fee recommendations:", error);
+    return null;
+  }
+}
+
+/* ---------------- Fixed broadcaster (CORS-compatible) ---------------- */
 async function broadcastEverywhere({ rawHex }) {
   const results = {};
 
@@ -131,7 +147,7 @@ async function broadcastEverywhere({ rawHex }) {
       {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         timeout: 20000,
-        validateStatus: () => true, // capture 4xx as normal responses
+        validateStatus: () => true,
       }
     );
     results["Blockchain.com"] = { ok: status >= 200 && status < 300, status, data };
@@ -171,18 +187,20 @@ async function broadcastEverywhere({ rawHex }) {
     results["Blockstream"] = { ok: false, status: null, error: e?.message || "request failed" };
   }
 
-  // 4) BlockCypher (fire-and-forget; no CORS readback in browser)
+  // 4) Replace BlockCypher with Bitaps (CORS-friendly)
   try {
-    const url = "https://api.blockcypher.com/v1/btc/main/txs/push";
-    const payload = new Blob([JSON.stringify({ tx: rawHex })], { type: "application/json" });
-    const sent = navigator.sendBeacon(url, payload);
-    results["BlockCypher"] = {
-      ok: sent,
-      status: sent ? "sent (no-cors)" : "failed to queue",
-      data: null,
-    };
+    const { data, status } = await axios.post(
+      "https://api.bitaps.com/btc/v1/broadcast/transaction",
+      { tx: rawHex },
+      {
+        headers: { "Content-Type": "application/json" },
+        timeout: 20000,
+        validateStatus: () => true,
+      }
+    );
+    results["Bitaps"] = { ok: status >= 200 && status < 300, status, data };
   } catch (e) {
-    results["BlockCypher"] = { ok: false, status: null, error: e?.message || "beacon failed" };
+    results["Bitaps"] = { ok: false, status: null, error: e?.message || "request failed" };
   }
 
   return results;
@@ -216,7 +234,7 @@ const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
   const handleAccelerate = async () => {
     setAccelerating(true); setErr(""); setResult(null);
     try {
-      const hex = await getMempoolHex(txid); // fetch raw hex in-browser
+      const hex = await getMempoolHex(txid);
       const results = await broadcastEverywhere({ rawHex: hex });
       setResult({ results, txid, hexPreview: shorten(hex, 12, 8) });
 
@@ -225,7 +243,7 @@ const AccelerationForm = ({ txid, currentFeeRate, onAccelerate, onCancel }) => {
         feeRate,
         accelerationId: "rebroadcast_" + Math.random().toString(36).slice(2, 10),
         timestamp: Date.now(),
-        estimatedConfirmationTime: Math.floor(Math.random() * 6) + 1, // cosmetic
+        estimatedConfirmationTime: Math.floor(Math.random() * 6) + 1,
       });
     } catch (e) {
       setErr(e?.message || "Rebroadcast failed");
@@ -357,31 +375,25 @@ const AccelerationHistory = ({ accelerations }) => {
 
 /* ---------------- Main App ---------------- */
 export default function App() {
-  const [device, setDevice] = useState("iphone"); // 'iphone' | 'galaxy'
+  const [device, setDevice] = useState("iphone");
   const [address, setAddress] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-
-  // NEW: Address Summary state
   const [addrLoading, setAddrLoading] = useState(false);
   const [addrError, setAddrError] = useState("");
   const [summary, setSummary] = useState({
     balanceSats: null,
     receivedSats: null,
     sentSats: null,
-    usdPrice: null, // current BTC/USD
+    usdPrice: null,
   });
-
-  const [txs, setTxs] = useState([]); // rawaddr list w/ I/O
+  const [txs, setTxs] = useState([]);
   const [selectedTxid, setSelectedTxid] = useState("");
-  const [filterMode, setFilterMode] = useState("all"); // 'all' | 'incoming' | 'outgoing'
-
+  const [filterMode, setFilterMode] = useState("all");
   const [blockHeight, setBlockHeight] = useState(null);
   const [tipHeight, setTipHeight] = useState(null);
-  const [usdDaily, setUsdDaily] = useState(null); // daily USD close to tx date
-  const [txSize, setTxSize] = useState(null); // bytes for fee rate calc
-
-  // NEW: Acceleration state
+  const [usdDaily, setUsdDaily] = useState(null);
+  const [txSize, setTxSize] = useState(null);
   const [showAcceleration, setShowAcceleration] = useState(false);
   const [accelerationHistory, setAccelerationHistory] = useState([]);
 
@@ -397,7 +409,7 @@ export default function App() {
     return { isIncoming, outToAddr, inFromAddr };
   };
 
-  /* ---- Blockchain.com charts: daily USD near the tx date (closest point) ---- */
+  /* ---- Blockchain.com charts: daily USD near the tx date ---- */
   const fetchUsdFromBlockchainCharts = async (timestamp) => {
     try {
       const start = dayStart(timestamp, -15);
@@ -421,7 +433,7 @@ export default function App() {
     }
   };
 
-  /* ---- NEW: fetch address summary (now we will display USD) ---- */
+  /* ---- fetch address summary ---- */
   async function fetchAddressSummary() {
     if (!address) return;
     setAddrError(""); setAddrLoading(true);
@@ -493,7 +505,7 @@ export default function App() {
     }
   }
 
-  /* ---- Hydrate selection: block height, tip, daily USD, size ---- */
+  /* ---- Hydrate selection ---- */
   useEffect(() => {
     let ignore = false;
     async function hydrate() {
@@ -556,7 +568,7 @@ export default function App() {
     const amountUsd = usdDaily != null ? amountBtc * usdDaily : null;
     const feeUsd = usdDaily != null ? feeBtc * usdDaily : null;
 
-    const feeRate = txSize ? selectedTx.fee / txSize : null; // sats/byte
+    const feeRate = txSize ? selectedTx.fee / txSize : null;
 
     const uniqueIns = [...new Set((selectedTx.ins || []).map((i) => i.addr).filter(Boolean))];
     const uniqueOuts = [...new Set((selectedTx.outs || []).map((o) => o.addr).filter(Boolean))];
@@ -621,6 +633,10 @@ export default function App() {
   const receivedUsd =
     summary.receivedSats != null && summary.usdPrice != null
       ? satsToBtc(summary.receivedSats) * summary.usdPrice
+      : null;
+  const sentUsd =
+    summary.sentSats != null && summary.usdPrice != null
+      ? satsToBtc(summary.sentSats) * summary.usdPrice
       : null;
 
   return (
@@ -751,9 +767,7 @@ export default function App() {
                 <div>
                   <div className="text-neutral-400">Total Sent</div>
                   <div className="font-medium">
-                    {summary.sentSats == null || summary.usdPrice == null
-                      ? (summary.sentSats == null ? "—" : `${summary.sentSats.toLocaleString()} sats`)
-                      : fmtUSD(satsToBtc(summary.sentSats) * summary.usdPrice)}
+                    {sentUsd == null ? "—" : fmtUSD(sentUsd)}
                   </div>
                   <div className="text-neutral-400 text-xs">
                     {summary.sentSats == null ? "" : `${fmtBtc(satsToBtc(summary.sentSats))} BTC`}
