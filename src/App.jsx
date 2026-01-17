@@ -298,7 +298,7 @@ const StatusBar = React.memo(({ device = "iphone" }) => {
             <div className="absolute -right-[3px] top-[3px] w-[2px] h-[6px] rounded-sm bg-neutral-400" />
             <div className="h-full w-[77%] bg-green-500" />
           </div>
-          <span className="text-[10px] text-neutral-400">77%</span>
+          <span className="text-[10px] text-neutral-400">45%</span>
         </div>
       )}
     </div>
