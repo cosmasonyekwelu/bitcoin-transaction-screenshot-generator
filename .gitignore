@@ -1,7 +1,38 @@
-# Node / Vite / build
-node_modules
-dist
-dist-ssr
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-ssr/
+
+# Environment files
+.env
+.env.*
 *.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / Editor
 .DS_Store
-.env*
+Thumbs.db
+
+# Vite
+.vite/
+
+# Cache
+.cache/
+.tmp/
+
+# IDE
+.vscode/
+.idea/
+
+# Testing
+coverage/
+
+# Misc
+*.tgz
