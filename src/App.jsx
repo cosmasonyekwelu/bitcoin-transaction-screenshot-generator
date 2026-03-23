@@ -6,6 +6,7 @@ import React, {
   useCallback,
 } from "react";
 import { toPng } from "html-to-image";
+import axios from "axios";
 
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { Toasts } from "./components/common/Toasts";
@@ -70,9 +71,16 @@ function App() {
   // Acceleration
   const [showAcceleration, setShowAcceleration] = useState(false);
   const [accelerationHistory, setAccelerationHistory] = useState([]);
+  const [statusBarTime, setStatusBarTime] = useState(() => new Date());
 
   const TARGET_CONF = 4;
   const previewRef = useRef(null);
+
+  useEffect(() => {
+    const tick = () => setStatusBarTime(new Date());
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   /* ---------- CLASSIFY (fixed: net value) ---------- */
   const classify = useCallback(
@@ -439,6 +447,8 @@ function App() {
     if (!previewRef.current) return;
     try {
       addToast("Saving screenshot—hold on small…", "info");
+      setStatusBarTime(new Date());
+      await new Promise((resolve) => requestAnimationFrame(() => resolve()));
       const dataUrl = await toPng(previewRef.current, {
         pixelRatio: 2,
         cacheBust: true,
@@ -577,7 +587,11 @@ function App() {
 
           {/* Phone preview */}
           <section className="flex items-start justify-center">
-            <DeviceFrame device={device} ref={previewRef}>
+            <DeviceFrame
+              device={device}
+              currentTime={statusBarTime}
+              ref={previewRef}
+            >
               <TransactionPreview
                 view={view}
                 TARGET_CONF={TARGET_CONF}

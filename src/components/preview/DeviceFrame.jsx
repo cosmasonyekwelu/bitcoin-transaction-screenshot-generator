@@ -2,7 +2,10 @@ import React, { forwardRef } from "react";
 import { StatusBar } from "./StatusBar";
 
 export const DeviceFrame = React.memo(
-  forwardRef(function DeviceFrame({ device = "iphone", children }, ref) {
+  forwardRef(function DeviceFrame(
+    { device = "iphone", currentTime, children },
+    ref
+  ) {
     const isIphone = device === "iphone";
     return (
       <div
@@ -16,7 +19,7 @@ export const DeviceFrame = React.memo(
         style={{ aspectRatio: "9/19.5" }}
       >
         <div className="absolute inset-0 m-[10px] rounded-[28px] overflow-hidden bg-neutral-900 border border-neutral-800">
-          <StatusBar device={device} />
+          <StatusBar device={device} currentTime={currentTime} />
           <div className="h-[calc(100%-12px)] overflow-auto bg-neutral-900 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {children}
           </div>

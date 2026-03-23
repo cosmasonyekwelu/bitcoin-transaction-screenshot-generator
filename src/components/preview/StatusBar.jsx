@@ -1,10 +1,23 @@
 import React from "react";
 
-export const StatusBar = React.memo(({ device = "iphone" }) => {
+const formatStatusTime = (dateLike) => {
+  const date =
+    dateLike instanceof Date ? dateLike : dateLike ? new Date(dateLike) : null;
+
+  if (!date || Number.isNaN(date.getTime())) return "—";
+
+  return date.toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+};
+
+export const StatusBar = React.memo(({ device = "iphone", currentTime }) => {
   const isIphone = device === "iphone";
+  const statusTime = formatStatusTime(currentTime);
   return (
     <div className="relative h-10 px-4 text-xs text-neutral-300 flex items-center justify-between">
-      <span>4:13</span>
+      <span>{statusTime}</span>
       {isIphone ? (
         <>
           <div className="absolute left-1/2 -translate-x-1/2 top-[6px] w-[120px] h-[26px] bg-black rounded-b-2xl" />
