@@ -1,103 +1,70 @@
 # BTC Tx Screenshot Generator
 
-A single-page React app (Vite + Tailwind) that generates a **pixel-perfect mobile screenshot** for a selected **Bitcoin transaction**, using **Blockchain.com APIs only** (Explorer + Charts + Ticker).
+A single-page React app built with Vite and Tailwind that lets you inspect a Bitcoin address or transaction, preview it in a mobile-style frame, and export the result as a PNG screenshot.
 
-## Features
+## What it does
 
-- **Bitcoin Address Explorer**
-
-  - Address summary: **Current balance**, **Total received**, **Total sent**, and **BTC price (USD)** from `blockchain.info/ticker`
-  - Transaction history preview (last 10) with **Incoming/Outgoing/All** filter
+- **Address explorer**
+  - Shows current balance, total received, total sent, and the latest BTC/USD price.
+  - Lists recent transactions for the address with incoming/outgoing/all filters.
 
 - **Transaction preview**
+  - Classifies the transaction as incoming or outgoing based on the selected address.
+  - Displays the transferred value, fee, fee rate, confirmations, timestamp, TXID, and quick explorer links.
 
-  - Real value moved (incoming: outputs to your address; outgoing: outputs to others)
-  - Network fee (BTC & USD), **fee rate (sat/vB)**, **status & confirmations**
-  - Time, TXID (copy), quick **View on Explorer**
+- **Mobile preview + export**
+  - Switches between iPhone and Samsung Galaxy device frames.
+  - Exports the preview as a PNG using html-to-image.
 
-- **Mobile device frame**
+- **Transaction acceleration / rebroadcast**
+  - Offers a rebroadcast flow for unconfirmed transactions using mempool.space data and broadcast endpoints.
+  - Keeps a local history of acceleration/rebroadcast attempts in the UI.
 
-  - Toggle **iPhone** / **Samsung Galaxy** CSS frame
-  - Hidden inner scrollbars for crisp screenshots
+## Tech stack
 
-- **Screenshot export**
+- React 19
+- Vite 7
+- Tailwind CSS 3
+- Axios and html-to-image
 
-  - Export the device frame + preview as **PNG** via `html-to-image`
+## Data sources
 
-## Tech
+- **Blockchain.com** endpoints are used for address balances, transaction history, transaction details, chain height, and market price data.
+- **mempool.space** is used for rebroadcast guidance and transaction broadcast attempts.
 
-- React 18, Vite 5, Tailwind 3
-- Axios, html-to-image
-- **APIs**: `blockchain.info` (Explorer + Charts + Ticker) — all requests include `?cors=true`
+> Note: The app is client-side only. No backend service or API key is required.
 
-## API Endpoints Used
-
-- Address summary (satoshis)
-
-  - `https://blockchain.info/q/addressbalance/{address}?confirmations=0&cors=true`
-  - `https://blockchain.info/q/getreceivedbyaddress/{address}?confirmations=0&cors=true`
-  - `https://blockchain.info/q/getsentbyaddress/{address}?confirmations=0&cors=true`
-
-- Address transactions (last 10):
-
-  - `https://blockchain.info/rawaddr/{address}?limit=10&cors=true`
-
-- TX detail (size/weight + block height):
-
-  - `https://blockchain.info/rawtx/{txid}?cors=true`
-
-- Chain tip (confirmations):
-
-  - `https://blockchain.info/q/getblockcount?cors=true`
-
-- Daily market price (USD, nearest to TX date):
-
-  - `https://api.blockchain.info/charts/market-price?start=YYYY-MM-DD&timespan=31days&format=json&cors=true`
-
-- Current BTC price (USD):
-
-  - `https://blockchain.info/ticker?cors=true`
-
-> **Note:** USD “value when transacted” is computed by multiplying the BTC amount by the **nearest daily price datapoint** from Blockchain.com Charts (not a per-block price).
-
-## Local Development
+## Local development
 
 ```bash
-npm i
+npm install
 npm run dev
 ```
 
-## Build / Preview
+## Build / preview
 
 ```bash
 npm run build
 npm run preview
 ```
 
-## Deploy to Vercel
+## Deployment
 
-**Dashboard (easy):**
+The repository includes deployment workflows for both Vercel and Netlify:
 
-1. Push the repo to GitHub.
-2. Go to [https://vercel.com/new](https://vercel.com/new) and import your repo.
-3. Build Command: `npm run build`
-   Output Directory: `dist`
-4. Deploy.
+- Vercel: use the workflow in [.github/workflows/deploy-vercel.yml](.github/workflows/deploy-vercel.yml) or deploy from the Vercel dashboard with the build command `npm run build` and output directory `dist`.
+- Netlify: use the workflow in [.github/workflows/deploy-netlify.yml](.github/workflows/deploy-netlify.yml).
 
-**GitHub Actions (optional):**
+## Privacy & security
 
-- Add repo **secrets**: `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`.
-- Use the provided workflow in `.github/workflows/deploy-vercel.yml` (or deploy from the dashboard).
-
-## Privacy & Security
-
-- All calls are **client-side** to `blockchain.info`. No API keys required.
-- We do not store addresses or transactions. See [`SECURITY.md`](SECURITY.md).
+- All requests are made directly from the browser.
+- No addresses, transactions, or screenshots are stored by the app.
+- See [SECURITY.md](SECURITY.md) for more details.
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) and open a PR using the template.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and open a PR using the repository template.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [LICENSE](LICENSE).
